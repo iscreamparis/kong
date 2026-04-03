@@ -1,0 +1,58 @@
+[package]
+name = "kong"
+version = "0.1.0"
+edition = "2021"
+description = "Unified dependency manager for Python, Node.js, and Rust"
+license = "MIT"
+
+[[bin]]
+name = "kong"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Cargo.lock parsing
+cargo-lock = "11"
+
+# HTTP client (blocking mode, TLS via rustls, JSON deserialization)
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls", "json"], default-features = false }
+
+# Hashing
+sha2 = "0.10"
+hex = "0.4"
+
+# Archive extraction
+zip = "2"
+tar = "0.4"
+flate2 = "1"
+
+# Windows NTFS junctions
+[target.'cfg(windows)'.dependencies]
+junction = "1"
+
+# Cross-platform
+dirs = "5"
+walkdir = "2"
+fs_extra = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Progress bars
+indicatif = "0.17"
+
+# Temp directories for downloads
+tempfile = "3"
