@@ -2,14 +2,20 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::download::{self, FileInfo};
 
 /// Metadata from PyPI JSON API.
 #[derive(Debug, Deserialize)]
 struct PypiPackageInfo {
+    info: PypiInfo,
     releases: std::collections::HashMap<String, Vec<PypiFileEntry>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PypiInfo {
+    requires_dist: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -28,8 +34,16 @@ struct PypiDigests {
     sha256: String,
 }
 
+/// A resolved transitive dependency (name + exact version from PyPI).
+#[derive(Debug, Clone)]
+pub struct TransitiveDep {
+    pub name: String,
+    pub version: String,
+}
+
 /// Fetch metadata from PyPI, download the best wheel, and extract to store.
-pub fn fetch_and_download(name: &str, version: &str, store_path: &Path) -> Result<FileInfo> {
+/// Returns the file info plus any transitive dependencies found in wheel METADATA.
+pub fn fetch_and_download(name: &str, version: &str, store_path: &Path) -> Result<(FileInfo, Vec<TransitiveDep>)> {
     let url = format!("https://pypi.org/pypi/{name}/json");
     debug!(url = %url, "Fetching PyPI metadata");
 
@@ -67,10 +81,91 @@ pub fn fetch_and_download(name: &str, version: &str, store_path: &Path) -> Resul
     crate::extract::extract(&result.path, store_path)?;
     crate::store::write_verified_marker(store_path, &result.hash)?;
 
-    Ok(FileInfo {
+    // Collect transitive deps from PyPI info.requires_dist (more reliable than
+    // reading the extracted METADATA file — same data, no filesystem walk).
+    let transitive = parse_requires_dist(info.info.requires_dist.as_deref().unwrap_or(&[]));
+
+    Ok((FileInfo {
         hash: result.hash,
         url: file.url.clone(),
-    })
+    }, transitive))
+}
+
+/// Resolve the latest version of a package from PyPI (used for transitive deps
+/// that have no pinned version in the manifest or lockfile).
+pub fn resolve_latest_version(name: &str) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Info { version: String }
+    #[derive(Deserialize)]
+    struct Response { info: Info }
+
+    let url = format!("https://pypi.org/pypi/{name}/json");
+    let resp: Response = reqwest::blocking::get(&url)
+        .with_context(|| format!("failed to fetch PyPI metadata for {name}"))?
+        .json()
+        .with_context(|| format!("failed to parse PyPI response for {name}"))?;
+    Ok(resp.info.version)
+}
+
+/// Parse `Requires-Dist` lines — public alias so config.rs can call it for
+/// already-cached packages.
+pub fn parse_requires_dist_pub(entries: &[String]) -> Vec<TransitiveDep> {
+    parse_requires_dist(entries)
+}
+
+/// Parse `Requires-Dist` lines from PyPI `info.requires_dist`.
+/// Skips extras (conditional deps like `extra == "async"`) and environment
+/// markers that would exclude this platform. Returns bare name + resolved version.
+fn parse_requires_dist(entries: &[String]) -> Vec<TransitiveDep> {
+    let mut deps = Vec::new();
+    for entry in entries {
+        // Skip anything with "extra ==" — those are optional deps
+        if entry.contains("extra ==") || entry.contains("extra==") {
+            continue;
+        }
+        // Strip environment markers (semicolon and after)
+        let spec = if let Some(idx) = entry.find(';') {
+            entry[..idx].trim()
+        } else {
+            entry.trim()
+        };
+        // Parse "Name>=version,<other" — take the name part only
+        let name_end = spec.find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '.')
+            .unwrap_or(spec.len());
+        let dep_name = spec[..name_end].trim().to_string();
+        if dep_name.is_empty() {
+            continue;
+        }
+        // Extract minimum version from first specifier like ">=3.1" or "==3.1.0"
+        let version_str = &spec[name_end..].trim();
+        if let Some(ver) = extract_min_version(version_str) {
+            deps.push(TransitiveDep { name: dep_name, version: ver });
+        } else {
+            // No pin — will be resolved to latest
+            deps.push(TransitiveDep { name: dep_name, version: String::new() });
+        }
+    }
+    deps
+}
+
+/// Extract a concrete version from a specifier like ">=3.1,<4" → "3.1"
+/// or "==3.1.0" → "3.1.0". Returns None if we can't extract anything useful.
+fn extract_min_version(spec: &str) -> Option<String> {
+    // Try == first (exact pin)
+    for part in spec.split(',') {
+        let part = part.trim();
+        if let Some(v) = part.strip_prefix("==") {
+            return Some(v.trim().to_string());
+        }
+    }
+    // Try >= (lower bound — good enough for transitive)
+    for part in spec.split(',') {
+        let part = part.trim();
+        if let Some(v) = part.strip_prefix(">=") {
+            return Some(v.trim().to_string());
+        }
+    }
+    None
 }
 
 fn select_best_file(files: &[PypiFileEntry]) -> Option<&PypiFileEntry> {

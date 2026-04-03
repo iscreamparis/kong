@@ -1,7 +1,7 @@
 # Rust
 /target/
 Cargo.lock
-
+build/
 # OS
 .DS_Store
 Thumbs.db

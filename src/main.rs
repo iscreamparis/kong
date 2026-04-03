@@ -34,26 +34,48 @@ fn main() -> Result<()> {
         }
         Commands::Use(cmd) => {
             info!(rules = %cmd.rules_path.display(), clean = cmd.clean, "Applying rules");
-            let rules = config::read_rules(&cmd.rules_path)?;
-            let project_dir = cmd
-                .rules_path
+
+            // Canonicalize the rules path so relative paths like ".\kong.rules"
+            // resolve to the correct absolute path before we strip the filename.
+            let rules_abs = cmd.rules_path
+                .canonicalize()
+                .unwrap_or_else(|_| cmd.rules_path.clone());
+            let project_dir = rules_abs
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new("."));
 
+            // Derive project name from the directory containing kong.rules.
+            let project_name = project_dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "project".to_string());
+
+            // Environments live in C:\kong\RULEZ\<project_name>\ so that hard
+            // links from the store (same drive) always work, regardless of which
+            // drive the project source lives on.
+            let env_dir = store::rulez_dir(&project_name)?;
+            info!(env_dir = %env_dir.display(), "Environments will be created in RULEZ");
+
             if cmd.clean {
-                link::clean_environments(project_dir)?;
+                link::clean_environments(&env_dir)?;
+                if !cmd.rules_path.exists() {
+                    info!("Clean complete");
+                    return Ok(());
+                }
             }
 
+            let rules = config::read_rules(&cmd.rules_path)?;
+
             if let Some(ref py) = rules.python {
-                python::venv::build_venv(project_dir, py, &store::store_root()?, &rules)?;
-                info!("Python .venv created");
+                python::venv::build_venv(&env_dir, py, &store::store_root()?, &rules)?;
+                info!(path = %env_dir.join(".venv").display(), "Python .venv created");
             }
             if let Some(ref node) = rules.node {
-                node::modules::build_node_modules(project_dir, node, &store::store_root()?)?;
-                info!("Node node_modules created");
+                node::modules::build_node_modules(&env_dir, node, &store::store_root()?)?;
+                info!(path = %env_dir.join("node_modules").display(), "Node node_modules created");
             }
             if let Some(ref rs) = rules.rust {
-                rust_eco::source::configure_source_replacement(project_dir, rs, &store::store_root()?)?;
+                rust_eco::source::configure_source_replacement(&env_dir, rs, &store::store_root()?, &rules)?;
                 info!("Rust source replacement configured");
             }
         }

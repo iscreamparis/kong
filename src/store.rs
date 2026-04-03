@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 // ── Store root detection ────────────────────────────────────────────────────
 
 pub fn store_root() -> Result<PathBuf> {
-    // 1. Check env var
+    // 1. Check env var (override for testing / custom setups)
     if let Ok(path) = std::env::var("KONG_STORE") {
         let p = PathBuf::from(path);
         std::fs::create_dir_all(&p)
@@ -13,18 +13,39 @@ pub fn store_root() -> Result<PathBuf> {
         return Ok(p);
     }
 
-    // 2. Platform default
-    #[cfg(windows)]
-    let root = PathBuf::from("C:\\kong\\store");
-
-    #[cfg(not(windows))]
-    let root = dirs::home_dir()
-        .context("could not determine home directory")?
-        .join(".kong");
+    // 2. Derive from executable location — store lives next to kong.exe
+    //    e.g. C:\kong\kong.exe  →  C:\kong\store\
+    let exe = std::env::current_exe()
+        .context("could not determine kong executable path")?;
+    let install_dir = exe
+        .parent()
+        .context("kong executable has no parent directory")?;
+    let root = install_dir.join("store");
 
     std::fs::create_dir_all(&root)
         .with_context(|| format!("failed to create store at {}", root.display()))?;
     Ok(root)
+}
+
+/// Returns the install directory root (parent of kong.exe), e.g. `C:\kong`.
+pub fn install_root() -> Result<PathBuf> {
+    let exe = std::env::current_exe()
+        .context("could not determine kong executable path")?;
+    Ok(exe.parent().context("kong executable has no parent directory")?.to_path_buf())
+}
+
+/// Returns the RULEZ directory for a named project:
+///   `<install_root>/RULEZ/<project_name>/`
+///
+/// All virtual environments (`.venv`, `node_modules`, `.rust-toolchain`) are
+/// created here instead of inside the project tree.  Because the RULEZ dir
+/// sits on the same drive as the store, hard links always work even when the
+/// project lives on a different drive.
+pub fn rulez_dir(project_name: &str) -> Result<PathBuf> {
+    let path = install_root()?.join("RULEZ").join(project_name);
+    std::fs::create_dir_all(&path)
+        .with_context(|| format!("failed to create RULEZ dir at {}", path.display()))?;
+    Ok(path)
 }
 
 // ── Store path helpers ──────────────────────────────────────────────────────

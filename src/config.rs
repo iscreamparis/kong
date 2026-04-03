@@ -21,13 +21,15 @@ pub struct KongRules {
     pub rust: Option<RustSection>,
 }
 
-/// Pinned runtime versions managed by KONG (no system Python/Node needed).
+/// Pinned runtime versions managed by KONG (no system Python/Node/Rust needed).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RuntimeSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub python: Option<RuntimeEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<RuntimeEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rust: Option<RuntimeEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -104,14 +106,25 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
 
         info!(count = python_deps.len(), version = %runtime.version, "Processing Python packages");
         let mut packages = Vec::new();
-        for dep in &python_deps {
+
+        // BFS queue — seed with direct deps, then expand transitives
+        use std::collections::VecDeque;
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut queue: VecDeque<crate::python::parser::PythonDep> = python_deps.into_iter().collect();
+
+        while let Some(dep) = queue.pop_front() {
+            let key = format!("{}-{}", dep.name.to_lowercase().replace('-', "_"), dep.version);
+            if !seen.insert(key) {
+                continue; // already processed
+            }
+
             let store_path = format!(
                 "python/libs/{}-{}-{}-{}",
                 dep.name, dep.version, py_tag, platform
             );
             let full_store_path = store_root.join(&store_path);
-            if !full_store_path.exists() || force {
-                let file_info = crate::python::client::fetch_and_download(
+            let transitive = if !full_store_path.exists() || force {
+                let (file_info, trans) = crate::python::client::fetch_and_download(
                     &dep.name, &dep.version, &full_store_path,
                 )?;
                 packages.push(PackageEntry {
@@ -121,6 +134,7 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
                     store_path,
                     source_url: Some(file_info.url),
                 });
+                trans
             } else {
                 debug!(pkg = %dep.name, ver = %dep.version, "Already in store, skipping");
                 packages.push(PackageEntry {
@@ -130,6 +144,29 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
                     store_path,
                     source_url: None,
                 });
+                // Still need transitive deps — read from already-extracted METADATA
+                read_transitive_from_store(&store_root.join(format!(
+                    "python/libs/{}-{}-{}-{}",
+                    dep.name, dep.version, py_tag, platform
+                )))
+            };
+
+            // Enqueue transitive deps not yet seen
+            for t in transitive {
+                let t_key = t.name.to_lowercase().replace('-', "_");
+                if seen.iter().any(|s| s.starts_with(&t_key)) {
+                    continue;
+                }
+                // Resolve exact version if we only have a lower bound
+                let version = if t.version.is_empty() || t.version.contains('<') || t.version.contains('>') {
+                    match crate::python::client::resolve_latest_version(&t.name) {
+                        Ok(v) => v,
+                        Err(e) => { tracing::warn!(pkg = %t.name, "Could not resolve version: {e}"); continue; }
+                    }
+                } else {
+                    t.version
+                };
+                queue.push_back(crate::python::parser::PythonDep { name: t.name, version });
             }
         }
         let section = PythonSection {
@@ -185,8 +222,11 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
 
     // ── Rust ────────────────────────────────────────────────────────────────
     let rust_deps = crate::rust_eco::parser::detect_and_parse(project_dir)?;
-    let rust_section = if !rust_deps.is_empty() {
-        info!(count = rust_deps.len(), "Found Rust dependencies");
+    let (rust_runtime, rust_section) = if !rust_deps.is_empty() {
+        info!("Found Rust dependencies — ensuring toolchain");
+        let runtime = crate::rust_eco::runtime::ensure_runtime(&store_root)?;
+
+        info!(count = rust_deps.len(), version = %runtime.version, "Processing Rust crates");
         let mut packages = Vec::new();
         for dep in &rust_deps {
             let store_path = format!("rust/crates/{}-{}", dep.name, dep.version);
@@ -213,13 +253,14 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
                 });
             }
         }
-        Some(RustSection { packages })
+        let entry = RuntimeEntry { version: runtime.version, store_path: runtime.store_path };
+        (Some(entry), Some(RustSection { packages }))
     } else {
-        None
+        (None, None)
     };
 
-    let runtimes = if python_runtime.is_some() || node_runtime.is_some() {
-        Some(RuntimeSection { python: python_runtime, node: node_runtime })
+    let runtimes = if python_runtime.is_some() || node_runtime.is_some() || rust_runtime.is_some() {
+        Some(RuntimeSection { python: python_runtime, node: node_runtime, rust: rust_runtime })
     } else {
         None
     };
@@ -254,6 +295,32 @@ fn short_python_tag(full_version: &str) -> String {
     let major = parts.next().unwrap_or("3");
     let minor = parts.next().unwrap_or("0");
     format!("cp{major}{minor}")
+}
+
+/// Read `Requires-Dist` from an already-extracted wheel in the store.
+/// Used when the package is already cached so we don't re-download it.
+fn read_transitive_from_store(store_path: &std::path::Path) -> Vec<crate::python::client::TransitiveDep> {
+    // The wheel is extracted flat: <store_path>/<PkgName>-<ver>.dist-info/METADATA
+    let dist_info = match std::fs::read_dir(store_path) {
+        Ok(rd) => rd,
+        Err(_) => return Vec::new(),
+    };
+    for entry in dist_info.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with(".dist-info") {
+            let metadata_path = entry.path().join("METADATA");
+            if let Ok(content) = std::fs::read_to_string(&metadata_path) {
+                let requires: Vec<String> = content
+                    .lines()
+                    .filter(|l| l.starts_with("Requires-Dist:"))
+                    .map(|l| l["Requires-Dist:".len()..].trim().to_string())
+                    .collect();
+                return crate::python::client::parse_requires_dist_pub(&requires);
+            }
+        }
+    }
+    Vec::new()
 }
 
 #[cfg(test)]
