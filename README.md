@@ -144,15 +144,20 @@ downloads + verifies     →          global store (written once)
 
 | Command | Description |
 |---------|-------------|
-| `kong clone <url>` | Clone a git repo (use `--setup` to auto-run rules + use) |
+| `kong clone <url> [dir]` | Clone a git repository into `[dir]` (defaults to repo name) |
+| `kong clone <url> --setup` | Clone and automatically run `kong rules` + `kong use` |
 | `kong rules` | Scan manifests, download all deps, write `kong.rules` |
 | `kong rules --force` | Re-download everything even if already in store |
-| `kong use kong.rules` | Create `.venv`, `node_modules`, `.cargo` via links |
-| `kong use kong.rules --clean` | Tear down and rebuild the project environment |
+| `kong rules --path <dir>` | Run rules on a different project directory |
+| `kong use [kong.rules]` | Create `.venv`, `node_modules`, `.cargo` via links |
+| `kong use --clean` | Tear down and rebuild the project environment |
 | `kong run <script>` | Run a script from `package.json` or `pyproject.toml` |
 | `kong run <script> -- <args>` | Pass extra arguments to the script |
+| `kong run <script> --path <dir>` | Run a script in a different project directory |
 | `kong store path` | Print the global store path |
 | `kong doctor` | Check store integrity and environment health |
+
+**Global flag:** `--verbose` / `-v` — enable detailed tracing output on any command.
 
 ---
 
