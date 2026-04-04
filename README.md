@@ -28,38 +28,7 @@ pnpm proved this model works for Node.js. KONG extends it to all three ecosystem
 
 ## Install
 
-### With KONG (recommended — bootstraps itself)
-
-Already have KONG? Update or install on a new machine in one line:
-
-**Windows (PowerShell, as Administrator):**
-```powershell
-kong clone https://github.com/iscreamparis/kong
-cd kong
-kong rules
-kong use kong.rules
-.  .\.rust-toolchain\activate.ps1   # activates kong-managed cargo + rustc
-cargo build --release
-Copy-Item target\release\kong.exe C:\kong\kong.exe
-```
-
-**Linux / macOS:**
-```bash
-kong clone https://github.com/iscreamparis/kong
-cd kong
-kong rules && kong use kong.rules
-source .rust-toolchain/activate.sh   # activates kong-managed cargo + rustc
-cargo build --release && sudo cp target/release/kong /usr/local/bin/kong
-```
-
-> KONG manages its own build dependencies — including the Rust toolchain. No `rustup` required.
-> The activation script adds the toolchain to PATH for the current console only — no system-wide changes.
-
----
-
-### From the installer (first install)
-
-Download the latest binary for your platform from the [Releases page](https://github.com/iscreamparis/kong/releases/latest) and put it on your PATH.
+Download the latest binary from the [Releases page](https://github.com/iscreamparis/kong/releases/latest) and put it on your PATH.
 
 **Windows (PowerShell, as Administrator):**
 ```powershell
@@ -73,13 +42,33 @@ curl -fsSL https://github.com/iscreamparis/kong/releases/latest/download/kong-li
 chmod +x /usr/local/bin/kong
 ```
 
-### From source (requires an existing Rust toolchain)
-```bash
-git clone https://github.com/iscreamparis/kong
+---
+
+## Build KONG with KONG
+
+KONG manages its own build dependencies — including the Rust toolchain. No `rustup` required.
+
+**Windows:**
+```powershell
+kong clone https://github.com/iscreamparis/kong
 cd kong
+kong rules
+kong use kong.rules
+. .\.rust-toolchain\activate.ps1   # adds cargo + rustc to current console
 cargo build --release
-# binary at target/release/kong
+Copy-Item target\release\kong.exe C:\kong\kong.exe
 ```
+
+**Linux / macOS:**
+```bash
+kong clone https://github.com/iscreamparis/kong
+cd kong
+kong rules && kong use kong.rules
+source .rust-toolchain/activate.sh   # adds cargo + rustc to current console
+cargo build --release && sudo cp target/release/kong /usr/local/bin/kong
+```
+
+> The activation script scopes the toolchain to the current console only — no system-wide changes.
 
 ---
 
@@ -230,7 +219,7 @@ No pip. No npm. No conda. No rustup. Just KONG.
 - [ ] **`kong add <pkg>`** — add a package and update `kong.rules` in one step
 
 ### v0.4 — Git integration (lite)
-- [ ] **`kong clone <url>`** — clone a repo and run `kong rules` + `kong use` in one step, for fresh machines without git installed
+- [x] **`kong clone <url>`** — clone a repo, then `kong rules` + `kong use` separately (or `--setup` for all-in-one)
 - [ ] **`kong login`** — authenticate with GitHub/GitLab for private repos
 - [ ] Bundles a minimal `git` client (clone, fetch, pull) via the `gitoxide` / `gix` Rust crate — no system git required
 
