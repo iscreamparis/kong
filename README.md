@@ -5,7 +5,6 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-blue.svg)]()
-[![Platform: Linux](https://img.shields.io/badge/platform-Linux-yellow.svg)]()
 [![Release](https://img.shields.io/github/v/release/iscreamparis/kong?label=download)](https://github.com/iscreamparis/kong/releases/latest)
 
 ---
@@ -30,17 +29,12 @@ pnpm proved this model works for Node.js. KONG extends it to all three ecosystem
 
 Download the latest binary from the [Releases page](https://github.com/iscreamparis/kong/releases/latest) and put it on your PATH.
 
-**Windows (PowerShell, as Administrator):**
 ```powershell
 Invoke-WebRequest -Uri "https://github.com/iscreamparis/kong/releases/latest/download/kong-windows-x86_64.exe" -OutFile "C:\kong\kong.exe"
 # The installer also adds C:\kong to your system PATH
 ```
 
-**Linux / macOS:**
-```bash
-curl -fsSL https://github.com/iscreamparis/kong/releases/latest/download/kong-linux-x86_64 -o /usr/local/bin/kong
-chmod +x /usr/local/bin/kong
-```
+> Linux and macOS builds are on the [roadmap](#roadmap).
 
 ---
 
@@ -48,7 +42,6 @@ chmod +x /usr/local/bin/kong
 
 KONG manages its own build dependencies — including the Rust toolchain. No `rustup` required.
 
-**Windows:**
 ```powershell
 kong clone https://github.com/iscreamparis/kong
 cd kong
@@ -59,22 +52,13 @@ cargo build --release
 Copy-Item target\release\kong.exe C:\kong\kong.exe
 ```
 
-**Linux / macOS:**
-```bash
-kong clone https://github.com/iscreamparis/kong
-cd kong
-kong rules && kong use kong.rules
-source .rust-toolchain/activate.sh   # adds cargo + rustc to current console
-cargo build --release && sudo cp target/release/kong /usr/local/bin/kong
-```
-
 > The activation script scopes the toolchain to the current console only — no system-wide changes.
 
 ---
 
 ## Quick Start
 
-```bash
+```powershell
 # 1. Go to your project
 cd my-project
 
@@ -85,8 +69,7 @@ kong rules
 kong use kong.rules
 
 # 4. Activate the Rust toolchain (current console only)
-. .\.rust-toolchain\activate.ps1   # Windows
-source .rust-toolchain/activate.sh  # Linux / macOS
+. .\.rust-toolchain\activate.ps1
 
 # 5. Work normally — your tools see nothing different
 python src/app.py
@@ -125,7 +108,7 @@ downloads + verifies     →          global store (written once)
                                       └── rust/crates/tokio-1.44.2/
 ```
 
-**The key insight:** KONG creates NTFS junctions (Windows) or symlinks (Linux/macOS) from your project directory into its central store. Vite, Python, Node.js, and Cargo all find their packages by walking up the filesystem — exactly as they would with a real local install. No wrappers. No shims. No `PATH` tricks.
+**The key insight:** KONG creates NTFS junctions from your project directory into its central store. Vite, Python, Node.js, and Cargo all find their packages by walking up the filesystem — exactly as they would with a real local install. No wrappers. No shims. No `PATH` tricks.
 
 ---
 
@@ -186,7 +169,7 @@ Everything lives in a single content-addressable store:
         └── node_modules/
 ```
 
-Packages are stored **once** and **hard-linked** into every project that needs them. Cross-drive projects (e.g. source on `Q:`, store on `C:`) use NTFS junctions instead.
+Packages are stored **once** and **hard-linked** into every project that needs them. Cross-drive projects (e.g. source on `Q:`, store on `C:`) use NTFS junctions.
 
 ---
 
@@ -208,26 +191,30 @@ No pip. No npm. No conda. No rustup. Just KONG.
 
 ## Roadmap
 
-### v0.2 — Performance
+### v0.2 — Migration
+- [ ] **`kong import`** — convert an existing project (with local `.venv`, `node_modules`, `.cargo`) to the KONG way. Moves already-installed packages into the global store instead of re-downloading them, then replaces the local copies with links.
+- [ ] **`kong eject`** — convert a KONG-managed project back to standalone. Copies packages from the store into real local directories so the project works without KONG. (We hope nobody uses this, but it should always be an option.)
+
+### v0.3 — Performance
 - [ ] **Parallel downloads** — all packages fetched concurrently (currently sequential)
 - [ ] **Progress bars** — `indicatif` integration for long downloads
 - [ ] **Resume on failure** — partial downloads restart from where they stopped
 
-### v0.3 — Broader compatibility
+### v0.4 — Broader compatibility
 - [ ] **Python resolver** — resolve `>=` version constraints without a lockfile
 - [ ] **`kong shell`** — drop into an activated shell for a project
 - [ ] **`kong add <pkg>`** — add a package and update `kong.rules` in one step
 
-### v0.4 — Git integration (lite)
+### v0.5 — Git integration (lite)
 - [x] **`kong clone <url>`** — clone a repo, then `kong rules` + `kong use` separately (or `--setup` for all-in-one)
 - [ ] **`kong login`** — authenticate with GitHub/GitLab for private repos
 - [ ] Bundles a minimal `git` client (clone, fetch, pull) via the `gitoxide` / `gix` Rust crate — no system git required
 
 ### v1.0 — Production
+- [ ] **Linux / macOS support** — symlinks instead of junctions, platform-specific wheel/binary selection, CI pipeline for cross-platform builds
 - [ ] private registry support
 - [ ] Windows installer with proper PATH management (NSIS → WiX)
 - [ ] `kong doctor` full report with auto-fix suggestions
-- [ ] Linux/macOS binary CI pipeline
 
 ---
 
@@ -236,7 +223,7 @@ No pip. No npm. No conda. No rustup. Just KONG.
 - **No external package managers.** KONG never calls `pip`, `npm`, `yarn`, `pnpm`, or `cargo install` as subprocesses. All registry communication is in-house via `reqwest`.
 - **Idempotent.** Every command is safe to re-run. Already in store? Skip the download. Link already exists? Skip the link.
 - **Transparent.** Your project directory looks exactly like a normal project to every tool. KONG is invisible at runtime.
-- **Windows-first.** NTFS junctions + hard links. Long paths. `\\?\` prefixes where needed.
+- **Windows-only (for now).** NTFS junctions + hard links. Long paths. `\\?\` prefixes where needed. Linux/macOS support is on the roadmap.
 
 ---
 
