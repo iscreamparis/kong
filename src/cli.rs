@@ -15,6 +15,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Clone a git repository and optionally run `kong rules` + `kong use`
+    Clone(CloneCmd),
     /// Parse manifests and create/update kong.rules
     Rules(RulesCmd),
     /// Create virtual environments from kong.rules
@@ -77,3 +79,16 @@ pub enum StoreAction {
 
 #[derive(Parser)]
 pub struct DoctorCmd;
+
+#[derive(Parser)]
+pub struct CloneCmd {
+    /// Repository URL to clone (e.g. https://github.com/owner/repo)
+    pub url: String,
+
+    /// Destination directory (defaults to the repository name)
+    pub directory: Option<PathBuf>,
+
+    /// Automatically run `kong rules` + `kong use` after clone
+    #[arg(long)]
+    pub setup: bool,
+}

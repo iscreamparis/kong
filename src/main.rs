@@ -15,6 +15,27 @@ use tracing::info;
 
 use cli::{Cli, Commands, StoreAction};
 
+fn which_git() -> String {
+    // Check PATH first, then common Windows install locations.
+    if std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return "git".to_string();
+    }
+    for candidate in &[
+        r"C:\Program Files\Git\cmd\git.exe",
+        r"C:\Program Files (x86)\Git\cmd\git.exe",
+    ] {
+        if std::path::Path::new(candidate).exists() {
+            return candidate.to_string();
+        }
+    }
+    "git".to_string() // let it fail with a legible OS error
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -25,6 +46,63 @@ fn main() -> Result<()> {
         .init();
 
     match cli.command {
+        Commands::Clone(cmd) => {
+            // Derive destination directory from the URL if not given.
+            let dest = cmd.directory.unwrap_or_else(|| {
+                let repo_name = cmd.url
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("repo")
+                    .trim_end_matches(".git");
+                std::path::PathBuf::from(repo_name)
+            });
+
+            info!(url = %cmd.url, dest = %dest.display(), "Cloning repository");
+
+            // Use git from PATH, or fall back to common Windows install locations.
+            let git = which_git();
+            let status = std::process::Command::new(&git)
+                .args(["clone", &cmd.url])
+                .arg(&dest)
+                .status()
+                .map_err(|e| anyhow::anyhow!("Failed to run git ({}): {}", git, e))?;
+
+            if !status.success() {
+                anyhow::bail!("git clone failed with exit code {:?}", status.code());
+            }
+
+            if !cmd.setup {
+                info!(path = %dest.display(), "Clone complete — run `kong rules` then `kong use` to set up");
+                return Ok(());
+            }
+
+            // Auto-run `kong rules` + `kong use` in the cloned directory.
+            info!("Running `kong rules`…");
+            let rules = config::generate_rules(&dest, false)?;
+            let rules_path = dest.join("kong.rules");
+            config::write_rules(&rules, &rules_path)?;
+            info!(path = %rules_path.display(), "kong.rules written");
+
+            info!("Running `kong use`…");
+            let project_name = dest
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "project".to_string());
+            let env_dir = store::rulez_dir(&project_name)?;
+
+            if let Some(ref py) = rules.python {
+                python::venv::build_venv(&env_dir, py, &store::store_root()?, &rules)?;
+            }
+            if let Some(ref node) = rules.node {
+                node::modules::build_node_modules(&env_dir, node, &store::store_root()?)?;
+            }
+            if let Some(ref rs) = rules.rust {
+                rust_eco::source::configure_source_replacement(&env_dir, rs, &store::store_root()?, &rules)?;
+            }
+            link::create_project_junctions(&dest, &env_dir, &rules)?;
+            info!(path = %dest.display(), "Clone + setup complete. `cd {}` and you're ready.", dest.display());
+        }
         Commands::Rules(cmd) => {
             let project_dir = cmd.path.unwrap_or_else(|| std::env::current_dir().unwrap());
             info!(path = %project_dir.display(), "Generating kong.rules");

@@ -28,6 +28,37 @@ pnpm proved this model works for Node.js. KONG extends it to all three ecosystem
 
 ## Install
 
+### With KONG (recommended — bootstraps itself)
+
+Already have KONG? Update or install on a new machine in one line:
+
+**Windows (PowerShell, as Administrator):**
+```powershell
+kong clone https://github.com/iscreamparis/kong
+cd kong
+kong rules
+kong use kong.rules
+.  .\.rust-toolchain\activate.ps1   # activates kong-managed cargo + rustc
+cargo build --release
+Copy-Item target\release\kong.exe C:\kong\kong.exe
+```
+
+**Linux / macOS:**
+```bash
+kong clone https://github.com/iscreamparis/kong
+cd kong
+kong rules && kong use kong.rules
+source .rust-toolchain/activate.sh   # activates kong-managed cargo + rustc
+cargo build --release && sudo cp target/release/kong /usr/local/bin/kong
+```
+
+> KONG manages its own build dependencies — including the Rust toolchain. No `rustup` required.
+> The activation script adds the toolchain to PATH for the current console only — no system-wide changes.
+
+---
+
+### From the installer (first install)
+
 Download the latest binary for your platform from the [Releases page](https://github.com/iscreamparis/kong/releases/latest) and put it on your PATH.
 
 **Windows (PowerShell, as Administrator):**
@@ -42,7 +73,7 @@ curl -fsSL https://github.com/iscreamparis/kong/releases/latest/download/kong-li
 chmod +x /usr/local/bin/kong
 ```
 
-Or build from source (requires a Rust toolchain):
+### From source (requires an existing Rust toolchain)
 ```bash
 git clone https://github.com/iscreamparis/kong
 cd kong
@@ -64,12 +95,16 @@ kong rules
 # 3. Wire up .venv / node_modules / .cargo in the project directory
 kong use kong.rules
 
-# 4. Work normally — your tools see nothing different
+# 4. Activate the Rust toolchain (current console only)
+. .\.rust-toolchain\activate.ps1   # Windows
+source .rust-toolchain/activate.sh  # Linux / macOS
+
+# 5. Work normally — your tools see nothing different
 python src/app.py
 node src/index.js
 cargo build --release
 
-# 5. Run scripts defined in package.json or pyproject.toml
+# 6. Run scripts defined in package.json or pyproject.toml
 kong run dev
 kong run build
 kong run test
@@ -109,6 +144,7 @@ downloads + verifies     →          global store (written once)
 
 | Command | Description |
 |---------|-------------|
+| `kong clone <url>` | Clone a git repo (use `--setup` to auto-run rules + use) |
 | `kong rules` | Scan manifests, download all deps, write `kong.rules` |
 | `kong rules --force` | Re-download everything even if already in store |
 | `kong use kong.rules` | Create `.venv`, `node_modules`, `.cargo` via links |
