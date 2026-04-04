@@ -191,21 +191,27 @@ No pip. No npm. No conda. No rustup. Just KONG.
 
 ## Roadmap
 
-### v0.2 — Migration
+### v0.2 — Critical fixes
+- [ ] **Node.js bin scripts** — link CLI tools into `node_modules/.bin/` so `npx`, `tsc`, `eslint` etc. work
+- [ ] **Proper wheel selection** — parse wheel filenames (PEP 427) instead of substring matching; check `requires_python`
+- [ ] **Transitive dependency cycle detection** — prevent `kong rules` from hanging on circular deps
+- [ ] **Download retry** — retry failed downloads before giving up
+
+### v0.3 — Migration
 - [ ] **`kong import`** — convert an existing project (with local `.venv`, `node_modules`, `.cargo`) to the KONG way. Moves already-installed packages into the global store instead of re-downloading them, then replaces the local copies with links.
 - [ ] **`kong eject`** — convert a KONG-managed project back to standalone. Copies packages from the store into real local directories so the project works without KONG. (We hope nobody uses this, but it should always be an option.)
 
-### v0.3 — Performance
+### v0.4 — Performance
 - [ ] **Parallel downloads** — all packages fetched concurrently (currently sequential)
 - [ ] **Progress bars** — `indicatif` integration for long downloads
 - [ ] **Resume on failure** — partial downloads restart from where they stopped
 
-### v0.4 — Broader compatibility
+### v0.5 — Broader compatibility
 - [ ] **Python resolver** — resolve `>=` version constraints without a lockfile
 - [ ] **`kong shell`** — drop into an activated shell for a project
 - [ ] **`kong add <pkg>`** — add a package and update `kong.rules` in one step
 
-### v0.5 — Git integration (lite)
+### v0.6 — Git integration (lite)
 - [x] **`kong clone <url>`** — clone a repo, then `kong rules` + `kong use` separately (or `--setup` for all-in-one)
 - [ ] **`kong login`** — authenticate with GitHub/GitLab for private repos
 - [ ] Bundles a minimal `git` client (clone, fetch, pull) via the `gitoxide` / `gix` Rust crate — no system git required
@@ -224,6 +230,32 @@ No pip. No npm. No conda. No rustup. Just KONG.
 - **Idempotent.** Every command is safe to re-run. Already in store? Skip the download. Link already exists? Skip the link.
 - **Transparent.** Your project directory looks exactly like a normal project to every tool. KONG is invisible at runtime.
 - **Windows-only (for now).** NTFS junctions + hard links. Long paths. `\\?\` prefixes where needed. Linux/macOS support is on the roadmap.
+
+---
+
+## Known Limitations
+
+KONG is early-stage software. Here's what doesn't work yet — no surprises.
+
+### Python
+- **No sdist compilation.** KONG downloads pre-built wheels only. If a package has no wheel for your platform (rare for popular packages, common for niche ones), it will download the source tarball but won't compile C extensions. Packages like `numpy`, `flask`, `requests` ship wheels and work fine.
+- **Loose wheel selection.** Platform tag matching uses substring search — it may pick a wheel for the wrong Python minor version on edge cases.
+- **`requires_python` not checked.** A package requiring Python 3.11+ will be selected even if KONG manages Python 3.10.
+- **Version ranges not resolved.** `>=1.0` or `~=2.3` in `requirements.txt` are skipped — only exact pins (`==`) and lockfile versions are handled. Use a lockfile for reliable results.
+
+### Node.js
+- **Bin scripts not linked.** `node_modules/.bin/` is not populated. CLI tools installed as npm packages (`tsc`, `eslint`, `jest`, `vite`) won't be found by `npx` or npm scripts. `kong run` works around this for scripts defined in `package.json`.
+- **No peer/optional dependency handling.** Peer deps are not resolved or validated.
+- **pnpm-lock.yaml not fully supported.** Declared in docs but the parser is incomplete — `package-lock.json` is the reliable path.
+
+### Rust
+- **Cargo features and patches ignored.** Source replacement works for vanilla `Cargo.lock` deps, but `[features]` selections and `[patch]` overrides in `Cargo.toml` are not reflected.
+
+### General
+- **Sequential downloads.** All packages are fetched one at a time. Large projects (478 crates for gflow) take minutes.
+- **No retry on network failure.** A single timeout or connection drop fails the entire `kong rules` run.
+- **No proxy support.** Corporate networks behind HTTP proxies can't use KONG yet.
+- **Cross-drive = file copy.** When the project and store are on different drives, hard links can't cross the boundary — KONG silently falls back to file copy (slower, uses more disk).
 
 ---
 
