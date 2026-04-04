@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -19,6 +20,9 @@ pub struct KongRules {
     pub node: Option<NodeSection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rust: Option<RustSection>,
+    /// Named runnable scripts (merged from package.json + pyproject.toml scripts sections).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub scripts: HashMap<String, String>,
 }
 
 /// Pinned runtime versions managed by KONG (no system Python/Node/Rust needed).
@@ -154,11 +158,15 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
             // Enqueue transitive deps not yet seen
             for t in transitive {
                 let t_key = t.name.to_lowercase().replace('-', "_");
-                if seen.iter().any(|s| s.starts_with(&t_key)) {
+                // Exact name match (ignoring version) — don't re-process any version of same pkg
+                if seen.iter().any(|s| {
+                    let s_name = s.split('-').next().unwrap_or(s);
+                    s_name == t_key
+                }) {
                     continue;
                 }
-                // Resolve exact version if we only have a lower bound
-                let version = if t.version.is_empty() || t.version.contains('<') || t.version.contains('>') {
+                // version is empty when no == pin found — resolve latest from PyPI
+                let version = if t.version.is_empty() {
                     match crate::python::client::resolve_latest_version(&t.name) {
                         Ok(v) => v,
                         Err(e) => { tracing::warn!(pkg = %t.name, "Could not resolve version: {e}"); continue; }
@@ -265,6 +273,9 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
         None
     };
 
+    // ── Scripts (merged from package.json + pyproject.toml) ─────────────────
+    let scripts = collect_scripts(project_dir);
+
     Ok(KongRules {
         version: 1,
         project: project_name,
@@ -273,6 +284,7 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
         python: python_section,
         node: node_section,
         rust: rust_section,
+        scripts,
     })
 }
 
@@ -323,6 +335,49 @@ fn read_transitive_from_store(store_path: &std::path::Path) -> Vec<crate::python
     Vec::new()
 }
 
+/// Collect runnable scripts from manifests in `project_dir`.
+/// Currently reads `package.json` → `scripts` and `pyproject.toml` → `[tool.taskipy.tasks]`.
+/// Results are stored in `kong.rules` so `kong run <script>` works offline.
+pub fn collect_scripts(project_dir: &Path) -> HashMap<String, String> {
+    let mut scripts: HashMap<String, String> = HashMap::new();
+
+    // ── package.json scripts ─────────────────────────────────────────────────
+    let pkg_json = project_dir.join("package.json");
+    if let Ok(content) = std::fs::read_to_string(&pkg_json) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(obj) = v.get("scripts").and_then(|s| s.as_object()) {
+                for (k, v) in obj {
+                    if let Some(cmd) = v.as_str() {
+                        scripts.insert(k.clone(), cmd.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // ── pyproject.toml [tool.taskipy.tasks] ─────────────────────────────────
+    let pyproject = project_dir.join("pyproject.toml");
+    if let Ok(content) = std::fs::read_to_string(&pyproject) {
+        if let Ok(v) = content.parse::<toml::Value>() {
+            if let Some(tasks) = v
+                .get("tool")
+                .and_then(|t| t.get("taskipy"))
+                .and_then(|t| t.get("tasks"))
+                .and_then(|t| t.as_table())
+            {
+                for (k, v) in tasks {
+                    if let Some(cmd) = v.as_str() {
+                        // Don't overwrite package.json scripts
+                        scripts.entry(k.clone()).or_insert_with(|| cmd.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    scripts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,6 +411,7 @@ mod tests {
             }),
             node: None,
             rust: None,
+            scripts: HashMap::new(),
         };
 
         let json = serde_json::to_string_pretty(&rules).unwrap();

@@ -24,7 +24,10 @@ pub fn ensure_runtime(store_root: &Path) -> Result<RustRuntime> {
     let store_path = format!("rust/toolchain/{version}");
     let toolchain_dir = store_root.join(&store_path);
 
-    if toolchain_dir.exists() && cargo_exe_in(&toolchain_dir).is_some() {
+    if toolchain_dir.exists()
+        && cargo_exe_in(&toolchain_dir).is_some()
+        && rustc_exe_in(&toolchain_dir).is_some()
+    {
         debug!(version = %version, "Rust toolchain already in store");
     } else {
         info!(version = %version, target = %target, "Downloading Rust toolchain");

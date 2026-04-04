@@ -30,7 +30,16 @@ pub fn download_and_verify(
     std::fs::create_dir_all(dest_dir)
         .with_context(|| format!("failed to create directory: {}", dest_dir.display()))?;
 
-    let response = reqwest::blocking::get(url)
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("kong-dependency-manager/0.1")
+        .timeout(std::time::Duration::from_secs(600)) // 10 min for large archives
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let response = client
+        .get(url)
+        .send()
         .with_context(|| format!("HTTP request failed: {url}"))?;
 
     if !response.status().is_success() {

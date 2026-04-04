@@ -1,0 +1,20 @@
+{
+  "folders": [
+    {
+      "name": "kong",
+      "path": "."
+    },
+    {
+      "name": "DummyKong",
+      "path": "test/DummyKong"
+    },
+    {
+      "name": "gflow",
+      "path": "test/gflow"
+    }
+  ],
+  "settings": {
+    "git.openRepositoryInParentFolders": "always",
+    "powershell.cwd": "kong"
+  }
+}

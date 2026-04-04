@@ -74,6 +74,85 @@ pub fn link_dir(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Create junctions from the project directory into the RULEZ env dir so that
+/// tools (Vite, Node.js, pip) can find `node_modules` and `.venv` by walking
+/// up the filesystem from the project root — no `NODE_PATH` env hacks needed.
+pub fn create_project_junctions(
+    project_dir: &Path,
+    env_dir: &Path,
+    rules: &crate::config::KongRules,
+) -> Result<()> {
+    if rules.node.is_some() {
+        let src = env_dir.join("node_modules");
+        let dst = project_dir.join("node_modules");
+        if src.exists() {
+            // If dst is a real (non-junction) directory, remove it only when it
+            // contains nothing but Vite's auto-created cache (.vite).
+            if dst.exists() && !junction::exists(&dst).unwrap_or(false) {
+                let vite_only = std::fs::read_dir(&dst)
+                    .map(|entries| {
+                        let names: Vec<_> = entries
+                            .filter_map(|e| e.ok())
+                            .map(|e| e.file_name())
+                            .collect();
+                        names.len() <= 1
+                            && names.iter().all(|n| n == ".vite")
+                    })
+                    .unwrap_or(false);
+                if vite_only {
+                    std::fs::remove_dir_all(&dst).with_context(|| {
+                        format!("failed to remove Vite cache dir {}", dst.display())
+                    })?;
+                    debug!(path = %dst.display(), "Removed Vite-only node_modules before junction");
+                }
+            }
+            if !dst.exists() {
+                link_dir(&src, &dst)
+                    .with_context(|| format!("failed to junction node_modules into project dir"))?;
+                debug!(dst = %dst.display(), "Junctioned node_modules into project dir");
+            }
+        }
+    }
+    if rules.python.is_some() {
+        let src = env_dir.join(".venv");
+        let dst = project_dir.join(".venv");
+        if src.exists() && !dst.exists() {
+            link_dir(&src, &dst)
+                .with_context(|| format!("failed to junction .venv into project dir"))?;
+            debug!(dst = %dst.display(), "Junctioned .venv into project dir");
+        }
+    }
+    Ok(())
+}
+
+/// Remove project-dir junctions created by `create_project_junctions`.
+/// Only removes the junction entry itself — not the target contents in RULEZ.
+pub fn clean_project_junctions(project_dir: &Path) -> Result<()> {
+    for name in &["node_modules", ".venv"] {
+        let p = project_dir.join(name);
+        if p.exists() {
+            #[cfg(windows)]
+            {
+                // Only delete the reparse point if it is actually a junction.
+                if junction::exists(&p).unwrap_or(false) {
+                    junction::delete(&p)
+                        .with_context(|| format!("failed to delete junction {}", p.display()))?;
+                    debug!(path = %p.display(), "Junction removed");
+                } else {
+                    debug!(path = %p.display(), "Not a junction — leaving real directory in place");
+                }
+            }
+            #[cfg(unix)]
+            {
+                if p.is_symlink() {
+                    std::fs::remove_file(&p)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Remove virtual environments created by `kong use`.
 pub fn clean_environments(project_dir: &Path) -> Result<()> {
     let venv = project_dir.join(".venv");

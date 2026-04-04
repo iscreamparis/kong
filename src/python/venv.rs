@@ -57,6 +57,7 @@ pub fn build_venv(project_dir: &Path, python: &PythonSection, store_root: &Path,
                 copy_or_link(&src_w, &scripts.join("pythonw.exe"))?;
             }
         }
+        write_activation_scripts_windows(&venv)?;
     }
     #[cfg(not(windows))]
     {
@@ -72,6 +73,7 @@ pub fn build_venv(project_dir: &Path, python: &PythonSection, store_root: &Path,
                 std::os::unix::fs::symlink(src_exe, &dst2)?;
             }
         }
+        write_activation_scripts_unix(&venv)?;
     }
 
     // ── Link packages from store into site-packages ──────────────────────────
@@ -121,6 +123,119 @@ fn major_minor(version: &str) -> String {
     let major = parts.next().unwrap_or("3");
     let minor = parts.next().unwrap_or("0");
     format!("{major}.{minor}")
+}
+
+/// Generate `Scripts\Activate.ps1` and `Scripts\activate.bat` inside the venv (Windows).
+#[cfg(windows)]
+fn write_activation_scripts_windows(venv: &Path) -> Result<()> {
+    let scripts = venv.join("Scripts");
+    let venv_abs = venv
+        .canonicalize()
+        .unwrap_or_else(|_| venv.to_path_buf());
+    let venv_str = venv_abs.to_string_lossy();
+
+    // ── Activate.ps1 ────────────────────────────────────────────────────────
+    let ps1_path = scripts.join("Activate.ps1");
+    if !ps1_path.exists() {
+        let ps1 = format!(
+            r#"# KONG-generated Python venv activation script
+$script:VENV = "{venv_str}"
+
+function global:deactivate([switch]$NonDestructive) {{
+    if (Test-Path Env:_KONG_OLD_PATH) {{
+        $env:PATH = $env:_KONG_OLD_PATH
+        Remove-Item Env:_KONG_OLD_PATH -ErrorAction SilentlyContinue
+    }}
+    if (Test-Path Function:_KONG_OLD_PROMPT) {{
+        Copy-Item Function:_KONG_OLD_PROMPT Function:prompt
+        Remove-Item Function:_KONG_OLD_PROMPT -ErrorAction SilentlyContinue
+    }}
+    Remove-Item Env:VIRTUAL_ENV -ErrorAction SilentlyContinue
+    Remove-Item Env:VIRTUAL_ENV_PROMPT -ErrorAction SilentlyContinue
+    if (!$NonDestructive) {{ Remove-Item Function:deactivate -ErrorAction SilentlyContinue }}
+}}
+
+deactivate -NonDestructive
+
+$env:VIRTUAL_ENV = $script:VENV
+$env:VIRTUAL_ENV_PROMPT = ".venv"
+$env:_KONG_OLD_PATH = $env:PATH
+$env:PATH = "$env:VIRTUAL_ENV\Scripts;$env:PATH"
+
+Copy-Item Function:prompt Function:_KONG_OLD_PROMPT -ErrorAction SilentlyContinue
+function global:prompt {{
+    Write-Host -NoNewline -ForegroundColor Green "(.venv) "
+    & $Function:_KONG_OLD_PROMPT
+}}
+"#
+        );
+        std::fs::write(&ps1_path, ps1)
+            .with_context(|| format!("failed to write {}", ps1_path.display()))?;
+        debug!("Wrote Activate.ps1");
+    }
+
+    // ── activate.bat ────────────────────────────────────────────────────────
+    let bat_path = scripts.join("activate.bat");
+    if !bat_path.exists() {
+        let bat = format!(
+            "@echo off\r\nset \"VIRTUAL_ENV={venv_str}\"\r\nset \"PATH=%VIRTUAL_ENV%\\Scripts;%PATH%\"\r\n"
+        );
+        std::fs::write(&bat_path, bat)
+            .with_context(|| format!("failed to write {}", bat_path.display()))?;
+        debug!("Wrote activate.bat");
+    }
+
+    Ok(())
+}
+
+/// Generate `bin/activate` POSIX shell script inside the venv (Unix).
+#[cfg(not(windows))]
+fn write_activation_scripts_unix(venv: &Path) -> Result<()> {
+    let bin = venv.join("bin");
+    let venv_abs = venv
+        .canonicalize()
+        .unwrap_or_else(|_| venv.to_path_buf());
+    let venv_str = venv_abs.to_string_lossy();
+
+    let activate_path = bin.join("activate");
+    if !activate_path.exists() {
+        let script = format!(
+            r#"# KONG-generated Python venv activation script
+VIRTUAL_ENV="{venv_str}"
+export VIRTUAL_ENV
+
+_KONG_OLD_PATH="$PATH"
+PATH="$VIRTUAL_ENV/bin:$PATH"
+export PATH
+
+_KONG_OLD_PS1="${{PS1:-}}"
+PS1="(.venv) ${{PS1:-}}"
+export PS1
+
+deactivate() {{
+    PATH="$_KONG_OLD_PATH"
+    export PATH
+    PS1="$_KONG_OLD_PS1"
+    export PS1
+    unset VIRTUAL_ENV _KONG_OLD_PATH _KONG_OLD_PS1
+    unset -f deactivate
+}}
+"#
+        );
+        std::fs::write(&activate_path, &script)
+            .with_context(|| format!("failed to write {}", activate_path.display()))?;
+        // Make it executable
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&activate_path)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&activate_path, perms)?;
+        }
+        debug!("Wrote bin/activate");
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

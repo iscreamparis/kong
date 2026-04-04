@@ -5,6 +5,7 @@ mod extract;
 mod link;
 mod node;
 mod python;
+mod runner;
 mod rust_eco;
 mod store;
 
@@ -58,6 +59,8 @@ fn main() -> Result<()> {
 
             if cmd.clean {
                 link::clean_environments(&env_dir)?;
+                // Also remove project-dir junctions/symlinks
+                link::clean_project_junctions(project_dir)?;
                 if !cmd.rules_path.exists() {
                     info!("Clean complete");
                     return Ok(());
@@ -78,6 +81,18 @@ fn main() -> Result<()> {
                 rust_eco::source::configure_source_replacement(&env_dir, rs, &store::store_root()?, &rules)?;
                 info!("Rust source replacement configured");
             }
+
+            // ── Project-dir junctions → RULEZ ─────────────────────────────
+            // Tools like Vite, Node, and Python resolve modules by walking up
+            // the filesystem from the project dir — they never see RULEZ.
+            // Create junctions so resolution just works without env hacks.
+            link::create_project_junctions(project_dir, &env_dir, &rules)?;
+            info!("Project-dir junctions created");
+        }
+        Commands::Run(cmd) => {
+            let project_dir = cmd.path
+                .unwrap_or_else(|| std::env::current_dir().unwrap());
+            runner::run(&cmd.script, &cmd.args, &project_dir)?;
         }
         Commands::Store(cmd) => match cmd.action {
             StoreAction::Path => {

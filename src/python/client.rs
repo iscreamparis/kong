@@ -148,20 +148,16 @@ fn parse_requires_dist(entries: &[String]) -> Vec<TransitiveDep> {
     deps
 }
 
-/// Extract a concrete version from a specifier like ">=3.1,<4" → "3.1"
-/// or "==3.1.0" → "3.1.0". Returns None if we can't extract anything useful.
+/// Extract a concrete version from a specifier like "==3.1.0" → "3.1.0".
+/// Only returns exact pins (==). For >= / ~= / etc. returns None so the
+/// caller can resolve the latest satisfying version via the PyPI API instead
+/// of using a truncated version string like "3.1" that doesn't exist on PyPI.
 fn extract_min_version(spec: &str) -> Option<String> {
-    // Try == first (exact pin)
+    // Only return exact pins — avoid returning "3.1" for ">=3.1" which breaks
+    // PyPI lookups (the actual release would be "3.1.0", "3.1.3", etc.)
     for part in spec.split(',') {
         let part = part.trim();
         if let Some(v) = part.strip_prefix("==") {
-            return Some(v.trim().to_string());
-        }
-    }
-    // Try >= (lower bound — good enough for transitive)
-    for part in spec.split(',') {
-        let part = part.trim();
-        if let Some(v) = part.strip_prefix(">=") {
             return Some(v.trim().to_string());
         }
     }
