@@ -261,7 +261,6 @@ KONG is early-stage software. Here's what doesn't work yet — no surprises.
 
 ## Contributing
 
-KONG is in active development. The codebase is 100% Rust. See `agents.md` for the full architecture and module breakdown.
 
 ```
 src/

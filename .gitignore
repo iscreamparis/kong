@@ -11,6 +11,9 @@ Thumbs.db
 *.suo
 *.user
 
+# Copilot customization (local only)
+.github/
+
 # Test artifacts
 /test/
 
