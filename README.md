@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-blue.svg)]()
-[![Release](https://img.shields.io/github/v/release/iscreamparis/kong?label=download)](https://github.com/iscreamparis/kong/releases/latest)
+[![Release](https://img.shields.io/github/v/release/iscreamparis/kong?include_prereleases&label=download)](https://github.com/iscreamparis/kong/releases)
 
 ---
 
@@ -27,12 +27,7 @@ pnpm proved this model works for Node.js. KONG extends it to all three ecosystem
 
 ## Install
 
-Download the latest binary from the [Releases page](https://github.com/iscreamparis/kong/releases/latest) and put it on your PATH.
-
-```powershell
-Invoke-WebRequest -Uri "https://github.com/iscreamparis/kong/releases/latest/download/kong-windows-x86_64.exe" -OutFile "C:\kong\kong.exe"
-# The installer also adds C:\kong to your system PATH
-```
+Download the installer from the [Releases page](https://github.com/iscreamparis/kong/releases) and run it. It drops `kong.exe` into `C:\kong\`, creates the store directory, and adds it to your system PATH.
 
 > Linux and macOS builds are on the [roadmap](#roadmap).
 
