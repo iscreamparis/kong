@@ -8,8 +8,8 @@ use tracing::debug;
 pub struct NodeDep {
     pub name: String,
     pub version: String,
-    pub resolved: Option<String>,
-    pub integrity: Option<String>,
+    pub _resolved: Option<String>,
+    pub _integrity: Option<String>,
 }
 
 /// Detect and parse Node.js dependency files in a project directory.
@@ -90,8 +90,8 @@ pub fn parse_package_lock(path: &Path) -> Result<Vec<NodeDep>> {
                 deps.push(NodeDep {
                     name,
                     version,
-                    resolved,
-                    integrity,
+                    _resolved: resolved,
+                    _integrity: integrity,
                 });
             }
         }
@@ -126,8 +126,8 @@ fn parse_v1_deps(deps_map: &serde_json::Map<String, serde_json::Value>, out: &mu
             out.push(NodeDep {
                 name: name.clone(),
                 version,
-                resolved,
-                integrity,
+                _resolved: resolved,
+                _integrity: integrity,
             });
         }
 
@@ -162,8 +162,8 @@ pub fn parse_package_json(path: &Path) -> Result<Vec<NodeDep>> {
                     deps.push(NodeDep {
                         name: name.clone(),
                         version: cleaned,
-                        resolved: None,
-                        integrity: None,
+                        _resolved: None,
+                        _integrity: None,
                     });
                 }
             }

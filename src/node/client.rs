@@ -13,6 +13,7 @@ struct NpmVersionInfo {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct NpmDist {
     tarball: String,
     #[serde(default)]

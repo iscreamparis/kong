@@ -8,6 +8,7 @@ Thumbs.db
 
 # Editor
 .vscode/settings.json
+*.code-workspace
 *.suo
 *.user
 

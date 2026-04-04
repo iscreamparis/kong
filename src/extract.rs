@@ -61,6 +61,7 @@ pub fn extract_targz(archive_path: &Path, dest: &Path) -> Result<()> {
 
 /// Extract a .tar.gz, stripping the first path component (like `tar --strip-components=1`).
 pub fn extract_targz_strip1(archive_path: &Path, dest: &Path) -> Result<()> {
+    #![allow(dead_code)]
     debug!(src = %archive_path.display(), dst = %dest.display(), "Extracting tar.gz (strip-1)");
 
     let file = std::fs::File::open(archive_path)

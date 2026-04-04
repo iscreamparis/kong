@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::download::{self, FileInfo};
 
@@ -19,6 +19,7 @@ struct PypiInfo {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct PypiFileEntry {
     filename: String,
     url: String,

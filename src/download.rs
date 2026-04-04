@@ -9,7 +9,7 @@ use tracing::{debug, info};
 pub struct DownloadResult {
     pub path: PathBuf,
     pub hash: String,
-    pub url: String,
+    pub _url: String,
 }
 
 /// Returned to callers after fetch_and_download completes.
@@ -81,7 +81,7 @@ pub fn download_and_verify(
     Ok(DownloadResult {
         path: dest_path,
         hash,
-        url: url.to_string(),
+        _url: url.to_string(),
     })
 }
 

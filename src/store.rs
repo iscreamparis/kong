@@ -50,6 +50,7 @@ pub fn rulez_dir(project_name: &str) -> Result<PathBuf> {
 
 // ── Store path helpers ──────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 pub fn python_store_path(
     store_root: &Path,
     name: &str,
@@ -63,6 +64,7 @@ pub fn python_store_path(
         .join(format!("{name}-{version}-{python_tag}-{platform_tag}"))
 }
 
+#[allow(dead_code)]
 pub fn node_store_path(store_root: &Path, name: &str, version: &str) -> PathBuf {
     store_root
         .join("node")
@@ -70,6 +72,7 @@ pub fn node_store_path(store_root: &Path, name: &str, version: &str) -> PathBuf 
         .join(format!("{name}-{version}"))
 }
 
+#[allow(dead_code)]
 pub fn rust_store_path(store_root: &Path, name: &str, version: &str) -> PathBuf {
     store_root
         .join("rust")

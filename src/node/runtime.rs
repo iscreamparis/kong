@@ -2,7 +2,7 @@
 /// Stores it at `<store>/node/runtime/<version>/` and returns the path to node.exe.
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use tracing::{debug, info};
 
@@ -12,8 +12,8 @@ const NODE_INDEX: &str = "https://nodejs.org/dist/index.json";
 pub struct NodeRuntime {
     pub version: String,        // e.g. "22.11.0"
     pub store_path: String,     // relative, e.g. "node/runtime/22.11.0"
-    pub node_exe: PathBuf,      // absolute path to node.exe / node
-    pub npm_exe: PathBuf,       // absolute path to npm / npm.cmd
+    pub _node_exe: PathBuf,     // absolute path to node.exe / node
+    pub _npm_exe: PathBuf,      // absolute path to npm / npm.cmd
 }
 
 /// Ensure the requested Node version is present in the store.
@@ -37,7 +37,7 @@ pub fn ensure_runtime(store_root: &Path, requested: &str) -> Result<NodeRuntime>
         .with_context(|| format!("npm not found after extraction in {}", runtime_dir.display()))?;
 
     info!(version = %version, exe = %node_exe.display(), "Node.js runtime ready");
-    Ok(NodeRuntime { version, store_path, node_exe, npm_exe })
+    Ok(NodeRuntime { version, store_path, _node_exe: node_exe, _npm_exe: npm_exe })
 }
 
 // ── Internal helpers ────────────────────────────────────────────────────────
@@ -89,7 +89,7 @@ fn resolve_release(requested: &str) -> Result<(String, String)> {
     Ok((url, version))
 }
 
-fn build_download_url(v_version: &str, version: &str) -> String {
+fn build_download_url(v_version: &str, _version: &str) -> String {
     #[cfg(windows)]
     return format!("https://nodejs.org/dist/{v_version}/node-{v_version}-win-x64.zip");
 

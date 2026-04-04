@@ -118,6 +118,7 @@ fn copy_or_link(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn major_minor(version: &str) -> String {
     let mut parts = version.splitn(3, '.');
     let major = parts.next().unwrap_or("3");

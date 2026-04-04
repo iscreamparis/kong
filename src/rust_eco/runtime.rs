@@ -2,7 +2,7 @@
 /// Stores it at `<store>/rust/toolchain/<version>/` and returns paths to cargo and rustc.
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use tracing::{debug, info};
 
 const CHANNEL_URL: &str = "https://static.rust-lang.org/dist/channel-rust-stable.toml";
@@ -11,8 +11,8 @@ const CHANNEL_URL: &str = "https://static.rust-lang.org/dist/channel-rust-stable
 pub struct RustRuntime {
     pub version: String,        // e.g. "1.86.0"
     pub store_path: String,     // relative, e.g. "rust/toolchain/1.86.0"
-    pub cargo_exe: PathBuf,     // absolute path to cargo.exe / cargo
-    pub rustc_exe: PathBuf,     // absolute path to rustc.exe / rustc
+    pub _cargo_exe: PathBuf,    // absolute path to cargo.exe / cargo
+    pub _rustc_exe: PathBuf,    // absolute path to rustc.exe / rustc
 }
 
 /// Ensure the stable Rust toolchain is present in the store.
@@ -46,7 +46,7 @@ pub fn ensure_runtime(store_root: &Path) -> Result<RustRuntime> {
         .with_context(|| format!("rustc not found after extraction in {}", toolchain_dir.display()))?;
 
     info!(version = %version, cargo = %cargo_exe.display(), "Rust toolchain ready");
-    Ok(RustRuntime { version, store_path, cargo_exe, rustc_exe })
+    Ok(RustRuntime { version, store_path, _cargo_exe: cargo_exe, _rustc_exe: rustc_exe })
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────

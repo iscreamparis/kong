@@ -184,6 +184,7 @@ pub fn clean_environments(project_dir: &Path) -> Result<()> {
 
 /// Remove a single file robustly: clears read-only attribute and retries on
 /// transient locks (e.g. Windows Defender scanning the file, os error 32).
+#[allow(dead_code)]
 fn remove_file_robust(p: &Path) -> Result<()> {
     for attempt in 0..5u32 {
         match std::fs::remove_file(p) {

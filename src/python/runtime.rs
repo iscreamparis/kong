@@ -13,7 +13,7 @@ const PBS_RELEASES_API: &str =
 pub struct PythonRuntime {
     pub version: String,
     pub store_path: String,     // relative, e.g. "python/runtime/3.12.9"
-    pub python_exe: PathBuf,    // absolute path to python.exe / python3
+    pub _python_exe: PathBuf,   // absolute path to python.exe / python3
 }
 
 /// Ensure the requested Python major.minor is present in the store.
@@ -35,7 +35,7 @@ pub fn ensure_runtime(store_root: &Path, requested: &str) -> Result<PythonRuntim
         .with_context(|| format!("python executable not found after extraction in {}", runtime_dir.display()))?;
 
     info!(version = %version, exe = %exe.display(), "Python runtime ready");
-    Ok(PythonRuntime { version, store_path, python_exe: exe })
+    Ok(PythonRuntime { version, store_path, _python_exe: exe })
 }
 
 // ── Internal helpers ────────────────────────────────────────────────────────
