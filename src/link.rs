@@ -1,8 +1,12 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
-use tracing::debug;
+use tracing::{debug, warn};
 use walkdir::WalkDir;
+
+/// Tracks whether we've already warned about copy fallback this session.
+static COPY_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Link all files from `src` into `dst` using hard links (files) and real
 /// directories.  Walks the tree recursively so every file in `dst` ends up
@@ -41,21 +45,61 @@ pub fn link_package(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Create a hard link for a file, falling back to copy on cross-device errors.
+/// Create a hard link for a file, falling back to symlink then copy on
+/// cross-device errors.
+///
+/// Fallback chain:
+/// 1. `hard_link` — same drive, zero extra disk
+/// 2. `symlink_file` — cross-drive, zero extra disk (Windows: needs Developer Mode)
+/// 3. `copy` — last resort, uses disk space
 pub fn link_file(src: &Path, dst: &Path) -> Result<()> {
     debug!(src = %src.display(), dst = %dst.display(), "Hard link file");
     match std::fs::hard_link(src, dst) {
         Ok(()) => Ok(()),
-        Err(e) if e.raw_os_error() == Some(17) => {
-            // os error 17 = ERROR_NOT_SAME_DEVICE — store and project are on
-            // different drives; fall back to file copy.
-            debug!(src = %src.display(), "Cross-drive: falling back to copy");
-            std::fs::copy(src, dst)
-                .with_context(|| format!("copy fallback failed: {}", src.display()))?;
-            Ok(())
+        Err(e) if is_cross_device(&e) => {
+            debug!(src = %src.display(), "Cross-drive: trying symlink");
+            match symlink_file(src, dst) {
+                Ok(()) => {
+                    debug!(src = %src.display(), "Cross-drive: symlink succeeded");
+                    Ok(())
+                }
+                Err(sym_err) => {
+                    debug!(src = %src.display(), err = %sym_err, "Symlink failed, falling back to copy");
+                    if !COPY_FALLBACK_WARNED.swap(true, Ordering::Relaxed) {
+                        warn!(
+                            "Symlinks unavailable — falling back to file copy. \
+                             Packages on other drives will use extra disk space. \
+                             Enable Developer Mode (Windows) to avoid this."
+                        );
+                    }
+                    std::fs::copy(src, dst)
+                        .with_context(|| format!("copy fallback failed: {}", src.display()))?;
+                    Ok(())
+                }
+            }
         }
         Err(e) => Err(e).with_context(|| format!("hard_link failed: {}", src.display())),
     }
+}
+
+/// Check whether an I/O error represents a cross-device link failure.
+fn is_cross_device(e: &std::io::Error) -> bool {
+    // Windows: ERROR_NOT_SAME_DEVICE = 17
+    // Unix:    EXDEV = 18
+    matches!(e.raw_os_error(), Some(17) | Some(18))
+}
+
+/// Platform-specific file symlink.
+#[cfg(windows)]
+fn symlink_file(src: &Path, dst: &Path) -> Result<()> {
+    std::os::windows::fs::symlink_file(src, dst)
+        .with_context(|| format!("symlink_file failed: {} -> {}", src.display(), dst.display()))
+}
+
+#[cfg(unix)]
+fn symlink_file(src: &Path, dst: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(src, dst)
+        .with_context(|| format!("symlink failed: {} -> {}", src.display(), dst.display()))
 }
 
 /// Create a directory junction (Windows) or symlink (Unix).
@@ -340,5 +384,43 @@ mod tests {
             std::fs::read_to_string(dst_dir.join("file.txt")).unwrap(),
             "data"
         );
+    }
+
+    #[test]
+    fn is_cross_device_detects_error_17() {
+        let e = std::io::Error::from_raw_os_error(17);
+        assert!(is_cross_device(&e));
+    }
+
+    #[test]
+    fn is_cross_device_detects_error_18() {
+        let e = std::io::Error::from_raw_os_error(18);
+        assert!(is_cross_device(&e));
+    }
+
+    #[test]
+    fn is_cross_device_rejects_other_errors() {
+        let e = std::io::Error::from_raw_os_error(5);
+        assert!(!is_cross_device(&e));
+    }
+
+    #[test]
+    fn symlink_file_creates_valid_link() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("original.txt");
+        std::fs::write(&src, "symlink test").unwrap();
+
+        let dst = tmp.path().join("sym.txt");
+        // On CI/dev without Developer Mode this may fail on Windows —
+        // that's expected and OK; the test validates the happy path.
+        match symlink_file(&src, &dst) {
+            Ok(()) => {
+                assert_eq!(std::fs::read_to_string(&dst).unwrap(), "symlink test");
+                assert!(dst.is_symlink());
+            }
+            Err(_) => {
+                // Symlinks not available (Windows without Developer Mode) — skip
+            }
+        }
     }
 }

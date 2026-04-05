@@ -3,7 +3,7 @@ name = "kong"
 version = "0.0.1-alpha"
 edition = "2021"
 description = "Unified dependency manager for Python, Node.js, and Rust"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 
 [[bin]]
 name = "kong"
