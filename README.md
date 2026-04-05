@@ -2,7 +2,7 @@
 
 > One tool. Python, Node.js, and Rust. Zero duplication. Zero wrappers.
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/iscreamparis/kong/blob/main/LICENSE-MIT)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![Platform: Windows](https://img.shields.io/badge/platform-Windows-blue.svg)]()
 [![Release](https://img.shields.io/github/v/release/iscreamparis/kong?include_prereleases&label=download)](https://github.com/iscreamparis/kong/releases)
@@ -205,6 +205,8 @@ No pip. No npm. No conda. No rustup. Just KONG.
 - [ ] **Python resolver** — resolve `>=` version constraints without a lockfile
 - [ ] **`kong shell`** — drop into an activated shell for a project
 - [ ] **`kong add <pkg>`** — add a package and update `kong.rules` in one step
+- [ ] **`kong store move <path>`** — move the global store to another disk (e.g. when the current drive is full)
+- [ ] **`kong store add <path>`** — add a secondary store on another disk; KONG picks the store with free space automatically
 
 ### v0.6 — Git integration (lite)
 - [x] **`kong clone <url>`** — clone a repo, then `kong rules` + `kong use` separately (or `--setup` for all-in-one)
@@ -275,4 +277,13 @@ src/
 
 ## License
 
-MIT © iscreamparis
+KONG is dual licensed under either of
+
+- MIT License ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+
+at your option.
+
+---
+
+Copyright (c) 2026 iscreamparis
