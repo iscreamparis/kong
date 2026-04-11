@@ -130,9 +130,13 @@ pub fn create_project_junctions(
         let src = env_dir.join("node_modules");
         let dst = project_dir.join("node_modules");
         if src.exists() {
-            // If dst is a real (non-junction) directory, remove it only when it
+            // If dst is a real (non-junction/non-symlink) directory, remove it only when it
             // contains nothing but Vite's auto-created cache (.vite).
-            if dst.exists() && !junction::exists(&dst).unwrap_or(false) {
+            #[cfg(windows)]
+            let dst_is_linked = junction::exists(&dst).unwrap_or(false);
+            #[cfg(not(windows))]
+            let dst_is_linked = dst.is_symlink();
+            if dst.exists() && !dst_is_linked {
                 let vite_only = std::fs::read_dir(&dst)
                     .map(|entries| {
                         let names: Vec<_> = entries

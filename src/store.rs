@@ -13,25 +13,32 @@ pub fn store_root() -> Result<PathBuf> {
         return Ok(p);
     }
 
-    // 2. Derive from executable location — store lives next to kong.exe
-    //    e.g. C:\kong\kong.exe  →  C:\kong\store\
-    let exe = std::env::current_exe()
-        .context("could not determine kong executable path")?;
-    let install_dir = exe
-        .parent()
-        .context("kong executable has no parent directory")?;
-    let root = install_dir.join("store");
+    // 2. Derive from a platform-appropriate location.
+    //    Windows: next to kong.exe  (e.g. C:\kong\store\)
+    //    macOS/Linux: ~/.local/share/kong/store  (XDG / macOS convention)
+    let root = install_root()?.join("store");
 
     std::fs::create_dir_all(&root)
         .with_context(|| format!("failed to create store at {}", root.display()))?;
     Ok(root)
 }
 
-/// Returns the install directory root (parent of kong.exe), e.g. `C:\kong`.
+/// Returns the kong data directory root.
+/// Windows: parent of kong.exe (e.g. `C:\kong`)
+/// macOS/Linux: `~/.local/share/kong` (XDG data dir)
 pub fn install_root() -> Result<PathBuf> {
-    let exe = std::env::current_exe()
-        .context("could not determine kong executable path")?;
-    Ok(exe.parent().context("kong executable has no parent directory")?.to_path_buf())
+    #[cfg(windows)]
+    {
+        let exe = std::env::current_exe()
+            .context("could not determine kong executable path")?;
+        Ok(exe.parent().context("kong executable has no parent directory")?.to_path_buf())
+    }
+    #[cfg(not(windows))]
+    {
+        let base = dirs::data_local_dir()
+            .context("could not determine local data directory (~/.local/share on Linux, ~/Library/Application Support on macOS)")?;
+        Ok(base.join("kong"))
+    }
 }
 
 /// Returns the RULEZ directory for a named project:

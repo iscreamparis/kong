@@ -57,6 +57,80 @@ pub fn build_node_modules(
     }
 
     info!("node_modules ready at {}", nm.display());
+
+    // ── Create .bin/ shims for executables ───────────────────────────────────
+    // npm creates node_modules/.bin/<name> → ../<pkg>/bin/script.js for every
+    // "bin" entry in a package's package.json. We replicate that here.
+    let bin_dir = nm.join(".bin");
+    std::fs::create_dir_all(&bin_dir)?;
+
+    for pkg in &node.packages {
+        let top_level = nm.join(&pkg.name);
+        if !top_level.exists() {
+            continue;
+        }
+        let pkg_json_path = top_level.join("package.json");
+        let content = match std::fs::read_to_string(&pkg_json_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let v: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let bin = match v.get("bin") {
+            Some(b) => b,
+            None => continue,
+        };
+
+        // "bin" can be a string (single binary named after the package) or an object.
+        let entries: Vec<(String, String)> = if let Some(s) = bin.as_str() {
+            let bin_name = pkg.name.split('/').last().unwrap_or(&pkg.name).to_string();
+            vec![(bin_name, s.to_string())]
+        } else if let Some(obj) = bin.as_object() {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        } else {
+            continue
+        };
+
+        for (bin_name, rel_path) in entries {
+            let shim = bin_dir.join(&bin_name);
+            if shim.exists() {
+                continue;
+            }
+            // Target is relative to node_modules/ root, e.g. ../vite/bin/vite.js
+            let target = top_level.join(&rel_path);
+            if !target.exists() {
+                debug!(bin = %bin_name, "bin target missing, skipping");
+                continue;
+            }
+            // Make target executable and symlink into .bin/
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = std::fs::metadata(&target) {
+                    let mut perms = meta.permissions();
+                    perms.set_mode(perms.mode() | 0o111);
+                    let _ = std::fs::set_permissions(&target, perms);
+                }
+                std::os::unix::fs::symlink(&target, &shim)
+                    .with_context(|| format!("failed to create .bin/{bin_name} shim"))?;
+            }
+            #[cfg(windows)]
+            {
+                // On Windows npm creates .cmd wrappers; create a simple one.
+                let target_str = target.to_string_lossy().replace('/', "\\");
+                let cmd_path = bin_dir.join(format!("{bin_name}.cmd"));
+                if !cmd_path.exists() {
+                    std::fs::write(&cmd_path, format!("@node \"{target_str}\" %*\r\n"))?;
+                }
+            }
+            debug!(bin = %bin_name, "Created .bin shim");
+        }
+    }
+
     Ok(())
 }
 

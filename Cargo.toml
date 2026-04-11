@@ -33,10 +33,6 @@ zip = "2"
 tar = "0.4"
 flate2 = "1"
 
-# Windows NTFS junctions
-[target.'cfg(windows)'.dependencies]
-junction = "1"
-
 # Cross-platform
 dirs = "5"
 walkdir = "2"
@@ -56,3 +52,7 @@ indicatif = "0.17"
 
 # Temp directories for downloads
 tempfile = "3"
+
+# Windows NTFS junctions
+[target.'cfg(windows)'.dependencies]
+junction = "1"
