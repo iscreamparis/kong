@@ -89,7 +89,7 @@ fn resolve_release(requested: &str) -> Result<(String, String)> {
     Ok((url, version))
 }
 
-fn build_download_url(v_version: &str, _version: &str) -> String {
+fn build_download_url(v_version: &str, version: &str) -> String {
     #[cfg(windows)]
     return format!("https://nodejs.org/dist/{v_version}/node-{v_version}-win-x64.zip");
 

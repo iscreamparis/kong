@@ -397,6 +397,7 @@ mod tests {
                     version: "22.11.0".to_string(),
                     store_path: "node/runtime/22.11.0".to_string(),
                 }),
+                rust: None,
             }),
             python: Some(PythonSection {
                 version: "3.12.9".to_string(),
