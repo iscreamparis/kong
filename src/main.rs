@@ -1,3 +1,4 @@
+mod brew;
 mod cli;
 mod config;
 mod download;
@@ -100,6 +101,21 @@ fn main() -> Result<()> {
             if let Some(ref rs) = rules.rust {
                 rust_eco::source::configure_source_replacement(&env_dir, rs, &store::store_root()?, &rules)?;
             }
+            if let Some(ref brew) = rules.brew {
+                let deps: Vec<crate::brew::parser::BrewDep> = brew
+                    .packages
+                    .iter()
+                    .map(|e| crate::brew::parser::BrewDep {
+                        name: e.name.clone(),
+                        kind: match e.kind.as_str() {
+                            "cask" => crate::brew::parser::BrewDepKind::Cask,
+                            "tap" => crate::brew::parser::BrewDepKind::Tap,
+                            _ => crate::brew::parser::BrewDepKind::Formula,
+                        },
+                    })
+                    .collect();
+                crate::brew::installer::ensure_installed(&deps)?;
+            }
             link::create_project_junctions(&dest, &env_dir, &rules)?;
             info!(path = %dest.display(), "Clone + setup complete. `cd {}` and you're ready.", dest.display());
         }
@@ -158,6 +174,29 @@ fn main() -> Result<()> {
             if let Some(ref rs) = rules.rust {
                 rust_eco::source::configure_source_replacement(&env_dir, rs, &store::store_root()?, &rules)?;
                 info!("Rust source replacement configured");
+            }
+
+            // ── Brew (system packages) ────────────────────────────────────
+            if let Some(ref brew) = rules.brew {
+                info!(count = brew.packages.len(), "Ensuring Homebrew packages");
+                let deps: Vec<crate::brew::parser::BrewDep> = brew
+                    .packages
+                    .iter()
+                    .map(|e| crate::brew::parser::BrewDep {
+                        name: e.name.clone(),
+                        kind: match e.kind.as_str() {
+                            "cask" => crate::brew::parser::BrewDepKind::Cask,
+                            "tap" => crate::brew::parser::BrewDepKind::Tap,
+                            _ => crate::brew::parser::BrewDepKind::Formula,
+                        },
+                    })
+                    .collect();
+                let installed = crate::brew::installer::ensure_installed(&deps)?;
+                if installed.is_empty() {
+                    info!("All Homebrew packages already installed");
+                } else {
+                    info!(packages = ?installed, "Newly installed Homebrew packages");
+                }
             }
 
             // ── Project-dir junctions → RULEZ ─────────────────────────────

@@ -20,9 +20,23 @@ pub struct KongRules {
     pub node: Option<NodeSection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rust: Option<RustSection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brew: Option<BrewSection>,
     /// Named runnable scripts (merged from package.json + pyproject.toml scripts sections).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub scripts: HashMap<String, String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BrewSection {
+    pub packages: Vec<BrewEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BrewEntry {
+    pub name: String,
+    /// "formula", "cask", or "tap"
+    pub kind: String,
 }
 
 /// Pinned runtime versions managed by KONG (no system Python/Node/Rust needed).
@@ -276,6 +290,26 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
     // ── Scripts (merged from package.json + pyproject.toml) ─────────────────
     let scripts = collect_scripts(project_dir);
 
+    // ── Brew ────────────────────────────────────────────────────────────────
+    let brew_deps = crate::brew::parser::detect_and_parse(project_dir)?;
+    let brew_section = if !brew_deps.is_empty() {
+        info!(count = brew_deps.len(), "Found Brewfile dependencies");
+        let packages = brew_deps
+            .iter()
+            .map(|d| BrewEntry {
+                name: d.name.clone(),
+                kind: match d.kind {
+                    crate::brew::parser::BrewDepKind::Formula => "formula".to_string(),
+                    crate::brew::parser::BrewDepKind::Cask => "cask".to_string(),
+                    crate::brew::parser::BrewDepKind::Tap => "tap".to_string(),
+                },
+            })
+            .collect();
+        Some(BrewSection { packages })
+    } else {
+        None
+    };
+
     Ok(KongRules {
         version: 1,
         project: project_name,
@@ -284,6 +318,7 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
         python: python_section,
         node: node_section,
         rust: rust_section,
+        brew: brew_section,
         scripts,
     })
 }
@@ -412,6 +447,7 @@ mod tests {
             }),
             node: None,
             rust: None,
+            brew: None,
             scripts: HashMap::new(),
         };
 
