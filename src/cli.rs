@@ -63,6 +63,10 @@ pub struct RunCmd {
     /// Path to project directory (defaults to current directory)
     #[arg(short, long)]
     pub path: Option<PathBuf>,
+
+    /// Skip automatic cargo build when target binary is missing
+    #[arg(long)]
+    pub no_build: bool,
 }
 
 #[derive(Parser)]

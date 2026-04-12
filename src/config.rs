@@ -35,8 +35,14 @@ pub struct BrewSection {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BrewEntry {
     pub name: String,
+    pub version: String,
     /// "formula", "cask", or "tap"
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
+    pub store_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
 }
 
 /// Pinned runtime versions managed by KONG (no system Python/Node/Rust needed).
@@ -294,18 +300,91 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
     let brew_deps = crate::brew::parser::detect_and_parse(project_dir)?;
     let brew_section = if !brew_deps.is_empty() {
         info!(count = brew_deps.len(), "Found Brewfile dependencies");
-        let packages = brew_deps
+        let mut packages = Vec::new();
+
+        // BFS queue — seed with direct deps, then expand transitive runtime deps
+        use std::collections::VecDeque;
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut queue: VecDeque<String> = brew_deps
             .iter()
-            .map(|d| BrewEntry {
-                name: d.name.clone(),
-                kind: match d.kind {
-                    crate::brew::parser::BrewDepKind::Formula => "formula".to_string(),
-                    crate::brew::parser::BrewDepKind::Cask => "cask".to_string(),
-                    crate::brew::parser::BrewDepKind::Tap => "tap".to_string(),
-                },
-            })
+            .filter(|d| d.kind == crate::brew::parser::BrewDepKind::Formula)
+            .map(|d| d.name.clone())
             .collect();
-        Some(BrewSection { packages })
+
+        while let Some(dep_name) = queue.pop_front() {
+            let key = dep_name.to_lowercase();
+            if !seen.insert(key) {
+                continue;
+            }
+
+            // Resolve formula from Homebrew API
+            let formula = match crate::brew::client::resolve_formula(&dep_name) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!(pkg = %dep_name, "Could not resolve brew formula: {e}");
+                    continue;
+                }
+            };
+
+            let store_path = format!("brew/{}-{}", formula.name, formula.version);
+            let full_store_path = store_root.join(&store_path);
+
+            if !full_store_path.exists() || force {
+                match crate::brew::client::download_bottle(&formula, &full_store_path) {
+                    Ok(file_info) => {
+                        packages.push(BrewEntry {
+                            name: formula.name.clone(),
+                            version: formula.version.clone(),
+                            kind: "formula".to_string(),
+                            hash: Some(file_info.hash),
+                            store_path,
+                            source_url: Some(file_info.url),
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(pkg = %dep_name, "Failed to download bottle: {e}");
+                        continue;
+                    }
+                }
+            } else {
+                debug!(pkg = %dep_name, ver = %formula.version, "Brew bottle already in store, skipping");
+                packages.push(BrewEntry {
+                    name: formula.name.clone(),
+                    version: formula.version.clone(),
+                    kind: "formula".to_string(),
+                    hash: None,
+                    store_path,
+                    source_url: None,
+                });
+            }
+
+            // Enqueue transitive runtime dependencies
+            for tdep in &formula.dependencies {
+                if !seen.contains(&tdep.to_lowercase()) {
+                    queue.push_back(tdep.clone());
+                }
+            }
+        }
+
+        // Second pass: fix up Mach-O placeholders now that all deps are in the store
+        #[cfg(target_os = "macos")]
+        {
+            let brew_store = store_root.join("brew");
+            for pkg in &packages {
+                let bottle_dir = store_root.join(&pkg.store_path);
+                if bottle_dir.exists() {
+                    if let Err(e) = crate::brew::client::fixup_macho_placeholders(&bottle_dir, &brew_store) {
+                        tracing::warn!(pkg = %pkg.name, "Failed to fix Mach-O placeholders: {e}");
+                    }
+                }
+            }
+        }
+
+        if packages.is_empty() {
+            None
+        } else {
+            Some(BrewSection { packages })
+        }
     } else {
         None
     };
