@@ -4,7 +4,7 @@
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/iscreamparis/kong/blob/main/LICENSE-MIT)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
-[![Platform: Windows](https://img.shields.io/badge/platform-Windows-blue.svg)]()
+[![Platform: Windows + macOS](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue.svg)]()
 [![Release](https://img.shields.io/github/v/release/iscreamparis/kong?include_prereleases&label=download)](https://github.com/iscreamparis/kong/releases)
 
 ---
@@ -27,9 +27,21 @@ pnpm proved this model works for Node.js. KONG extends it to all three ecosystem
 
 ## Install
 
+### Windows
+
 Download the installer from the [Releases page](https://github.com/iscreamparis/kong/releases) and run it. It drops `kong.exe` into `C:\kong\`, creates the store directory, and adds it to your system PATH.
 
-> Linux and macOS builds are on the [roadmap](#roadmap).
+### macOS
+
+```bash
+# Build from source (requires Rust toolchain)
+git clone https://github.com/iscreamparis/kong
+cd kong
+cargo build --release
+cp target/release/kong ~/.local/bin/
+```
+
+The store lives at `~/Library/Application Support/kong/`. On macOS, KONG uses symlinks instead of NTFS junctions.
 
 ---
 
@@ -53,7 +65,7 @@ Copy-Item target\release\kong.exe C:\kong\kong.exe
 
 ## Quick Start
 
-```powershell
+```bash
 # 1. Go to your project
 cd my-project
 
@@ -63,15 +75,12 @@ kong rules
 # 3. Wire up .venv / node_modules / .cargo in the project directory
 kong use kong.rules
 
-# 4. Activate the Rust toolchain (current console only)
-. .\.rust-toolchain\activate.ps1
-
-# 5. Work normally — your tools see nothing different
+# 4. Work normally — your tools see nothing different
 python src/app.py
 node src/index.js
 cargo build --release
 
-# 6. Run scripts defined in package.json or pyproject.toml
+# 5. Run scripts defined in package.json or pyproject.toml
 kong run dev
 kong run build
 kong run test
@@ -103,7 +112,7 @@ downloads + verifies     →          global store (written once)
                                       └── rust/crates/tokio-1.44.2/
 ```
 
-**The key insight:** KONG creates NTFS junctions from your project directory into its central store. Vite, Python, Node.js, and Cargo all find their packages by walking up the filesystem — exactly as they would with a real local install. No wrappers. No shims. No `PATH` tricks.
+**The key insight:** KONG creates NTFS junctions (Windows) or symlinks (macOS/Linux) from your project directory into its central store. Vite, Python, Node.js, and Cargo all find their packages by walking up the filesystem — exactly as they would with a real local install. No wrappers. No shims. No `PATH` tricks.
 
 ---
 
@@ -172,13 +181,18 @@ Packages are stored **once** and **hard-linked** into every project that needs t
 
 [DummyKong](https://github.com/iscreamparis/DummyKong) is KONG's reference test project: a Flask backend + Vite/Vue frontend + Rust fractal renderer, all managed by KONG.
 
-```powershell
+```bash
 git clone https://github.com/iscreamparis/DummyKong
 cd DummyKong
-kong rules          # downloads Flask, Vue, fractal crates — all to global store
-kong use kong.rules # wires .venv, node_modules, .cargo into project dir
-.\run.ps1           # starts Flask :5000 + Vite :5173 + renders ASCII fractal
+kong rules              # downloads Flask, Vue, fractal crates — all to global store
+kong use kong.rules     # wires .venv, node_modules, .cargo into project dir
+kong run backend        # starts Flask on :5000 (uses Postgres + Redis)
+kong run dev            # starts Vite on :5173
+kong run fractal        # renders ASCII Mandelbrot
+kong run health         # checks Postgres/Redis connectivity via jq
 ```
+
+DummyKong uses a `Brewfile` for system dependencies (`postgresql@17`, `redis`, `jq`) — Homebrew integration in KONG is [on the roadmap](#roadmap).
 
 No pip. No npm. No conda. No rustup. Just KONG.
 
@@ -186,35 +200,43 @@ No pip. No npm. No conda. No rustup. Just KONG.
 
 ## Roadmap
 
-### v0.2 — Critical fixes
-- [ ] **Node.js bin scripts** — link CLI tools into `node_modules/.bin/` so `npx`, `tsc`, `eslint` etc. work
-- [ ] **Proper wheel selection** — parse wheel filenames (PEP 427) instead of substring matching; check `requires_python`
+### v0.2 — Cross-platform + critical fixes ✅
+- [x] **macOS / Apple Silicon support** — symlinks instead of NTFS junctions, platform-aware store path (`~/Library/Application Support/kong/`), arm64 wheel selection
+- [x] **Node.js bin scripts** — link CLI tools into `node_modules/.bin/` so `vite`, `tsc`, `eslint` etc. work via `kong run`
+- [x] **Architecture-aware wheel selection** — correctly pick arm64 wheels on Apple Silicon (any compatible macOS version)
+- [ ] **Proper wheel selection** — full PEP 427 filename parsing; check `requires_python`
 - [ ] **Transitive dependency cycle detection** — prevent `kong rules` from hanging on circular deps
 - [ ] **Download retry** — retry failed downloads before giving up
 
-### v0.3 — Migration
+### v0.3 — Homebrew / system dependencies
+- [ ] **`Brewfile` support** — `kong rules` detects `Brewfile`, `kong use` installs missing Homebrew packages
+- [ ] **`kong brew`** — manage system-level dependencies (PostgreSQL, Redis, etc.) alongside Python/Node/Rust
+- [ ] **Service management** — start/stop Homebrew services (`brew services start`) as part of `kong run`
+
+### v0.4 — Migration
 - [ ] **`kong import`** — convert an existing project (with local `.venv`, `node_modules`, `.cargo`) to the KONG way. Moves already-installed packages into the global store instead of re-downloading them, then replaces the local copies with links.
 - [ ] **`kong eject`** — convert a KONG-managed project back to standalone. Copies packages from the store into real local directories so the project works without KONG. (We hope nobody uses this, but it should always be an option.)
 
-### v0.4 — Performance
+### v0.5 — Performance
 - [ ] **Parallel downloads** — all packages fetched concurrently (currently sequential)
 - [ ] **Progress bars** — `indicatif` integration for long downloads
 - [ ] **Resume on failure** — partial downloads restart from where they stopped
 
-### v0.5 — Broader compatibility
+### v0.6 — Broader compatibility
 - [ ] **Python resolver** — resolve `>=` version constraints without a lockfile
 - [ ] **`kong shell`** — drop into an activated shell for a project
 - [ ] **`kong add <pkg>`** — add a package and update `kong.rules` in one step
 - [ ] **`kong store move <path>`** — move the global store to another disk (e.g. when the current drive is full)
 - [ ] **`kong store add <path>`** — add a secondary store on another disk; KONG picks the store with free space automatically
 
-### v0.6 — Git integration (lite)
+### v0.7 — Git integration (lite)
 - [x] **`kong clone <url>`** — clone a repo, then `kong rules` + `kong use` separately (or `--setup` for all-in-one)
 - [ ] **`kong login`** — authenticate with GitHub/GitLab for private repos
 - [ ] Bundles a minimal `git` client (clone, fetch, pull) via the `gitoxide` / `gix` Rust crate — no system git required
 
 ### v1.0 — Production
-- [ ] **Linux / macOS support** — symlinks instead of junctions, platform-specific wheel/binary selection, CI pipeline for cross-platform builds
+- [x] **macOS support** — symlinks instead of junctions, platform-specific wheel/binary selection
+- [ ] **Linux support** — CI pipeline for cross-platform builds
 - [ ] private registry support
 - [ ] Windows installer with proper PATH management (NSIS → WiX)
 - [ ] `kong doctor` full report with auto-fix suggestions
@@ -226,7 +248,7 @@ No pip. No npm. No conda. No rustup. Just KONG.
 - **No external package managers.** KONG never calls `pip`, `npm`, `yarn`, `pnpm`, or `cargo install` as subprocesses. All registry communication is in-house via `reqwest`.
 - **Idempotent.** Every command is safe to re-run. Already in store? Skip the download. Link already exists? Skip the link.
 - **Transparent.** Your project directory looks exactly like a normal project to every tool. KONG is invisible at runtime.
-- **Windows-only (for now).** NTFS junctions + hard links. Long paths. `\\?\` prefixes where needed. Linux/macOS support is on the roadmap.
+- **Cross-platform.** Windows (NTFS junctions + hard links) and macOS (symlinks + hard links). Linux support coming.
 
 ---
 
@@ -241,7 +263,7 @@ KONG is early-stage software. Here's what doesn't work yet — no surprises.
 - **Version ranges not resolved.** `>=1.0` or `~=2.3` in `requirements.txt` are skipped — only exact pins (`==`) and lockfile versions are handled. Use a lockfile for reliable results.
 
 ### Node.js
-- **Bin scripts not linked.** `node_modules/.bin/` is not populated. CLI tools installed as npm packages (`tsc`, `eslint`, `jest`, `vite`) won't be found by `npx` or npm scripts. `kong run` works around this for scripts defined in `package.json`.
+- ~~**Bin scripts not linked.**~~ Fixed — `node_modules/.bin/` is now populated with symlinks (macOS/Linux) or `.cmd` wrappers (Windows) for all packages declaring `"bin"` in their `package.json`.
 - **No peer/optional dependency handling.** Peer deps are not resolved or validated.
 - **pnpm-lock.yaml not fully supported.** Declared in docs but the parser is incomplete — `package-lock.json` is the reliable path.
 

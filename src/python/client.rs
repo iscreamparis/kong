@@ -166,33 +166,64 @@ fn extract_min_version(spec: &str) -> Option<String> {
 }
 
 fn select_best_file(files: &[PypiFileEntry]) -> Option<&PypiFileEntry> {
-    // 1. py3-none-any wheel
+    // 1. py3-none-any wheel (pure Python — always compatible)
     if let Some(f) = files.iter().find(|f| {
         f.packagetype == "bdist_wheel" && f.filename.contains("py3-none-any")
     }) {
         return Some(f);
     }
 
-    // 2. Any wheel matching current platform
+    // 2. py2.py3-none-any wheel (dual-compat pure Python)
+    if let Some(f) = files.iter().find(|f| {
+        f.packagetype == "bdist_wheel" && f.filename.contains("py2.py3-none-any")
+    }) {
+        return Some(f);
+    }
+
+    // 3. Platform-specific wheel matching current arch
     let platform_tag = current_platform_tag();
+    let arch_suffix = current_arch_suffix();
+
+    // Exact platform tag match first
     if let Some(f) = files.iter().find(|f| {
         f.packagetype == "bdist_wheel" && f.filename.contains(&platform_tag)
     }) {
         return Some(f);
     }
 
-    // 3. Any wheel
+    // On macOS, accept any macosx_*_<arch> wheel (different min OS versions are fine)
+    if !arch_suffix.is_empty() {
+        if let Some(f) = files.iter().find(|f| {
+            f.packagetype == "bdist_wheel" && f.filename.contains(&arch_suffix)
+        }) {
+            return Some(f);
+        }
+    }
+
+    // 4. Any wheel (last resort — may be wrong arch)
     if let Some(f) = files.iter().find(|f| f.packagetype == "bdist_wheel") {
         return Some(f);
     }
 
-    // 4. Source dist
+    // 5. Source dist
     files.iter().find(|f| f.packagetype == "sdist")
 }
 
 fn current_platform_tag() -> String {
-    // Delegate to the single canonical implementation in config
     crate::config::platform_tag()
+}
+
+/// Returns the architecture-specific suffix to match in wheel filenames.
+/// e.g. "arm64.whl" on Apple Silicon, "x86_64.whl" on Intel Mac, "" otherwise.
+fn current_arch_suffix() -> String {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "arm64.whl".to_string(),
+        ("macos", "x86_64")  => "x86_64.whl".to_string(),
+        ("linux", "x86_64")  => "x86_64.whl".to_string(),
+        ("linux", "aarch64") => "aarch64.whl".to_string(),
+        ("windows", "x86_64") => "amd64.whl".to_string(),
+        _ => String::new(),
+    }
 }
 
 #[cfg(test)]
