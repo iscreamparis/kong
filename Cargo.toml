@@ -50,6 +50,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Progress bars
 indicatif = "0.17"
 
+# GUI
+slint = "1.15"
+
 # Temp directories for downloads
 tempfile = "3"
 
@@ -60,3 +63,6 @@ libc = "0.2"
 # Windows NTFS junctions
 [target.'cfg(windows)'.dependencies]
 junction = "1"
+
+[build-dependencies]
+slint-build = "1.15"

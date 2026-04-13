@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod download;
 mod extract;
+mod gui;
 mod link;
 mod node;
 mod python;
@@ -329,6 +330,11 @@ fn main() -> Result<()> {
             info!("Running diagnostics...");
             let report = store::doctor()?;
             report.print();
+        }
+        Commands::Gui(cmd) => {
+            let project_dir = cmd.path
+                .unwrap_or_else(|| std::env::current_dir().unwrap());
+            gui::launch(Some(&project_dir))?;
         }
     }
 

@@ -1,6 +1,10 @@
 use std::process::Command;
 
 fn main() {
+    // ── Slint UI compilation ────────────────────────────────────────────────
+    slint_build::compile("ui/kong.slint").expect("Slint build failed");
+
+    // ── Windows NSIS installer (release builds only) ────────────────────────
     // Only build the installer on Windows release builds.
     // The CARGO_PROFILE env var is set by Cargo.
     let profile = std::env::var("PROFILE").unwrap_or_default();

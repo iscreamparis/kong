@@ -1,0 +1,551 @@
+import { TabWidget, Button, VerticalBox, HorizontalBox, GridBox, 
+         StandardListView, ListView, LineEdit, GroupBox,
+         ScrollView, ComboBox, CheckBox, Spinner, SpinBox } from "std-widgets.slint";
+
+// ── Data models ─────────────────────────────────────────────────────────────
+
+export struct ProjectInfo {
+    name: string,
+    path: string,
+    scripts: string,       // comma-separated script names
+    has-services: bool,
+    status: string,        // "ready", "needs-setup", "unknown"
+}
+
+export struct ServiceInfo {
+    name: string,
+    project: string,
+    status: string,        // "running", "stopped", "dead"
+    port: string,
+    pid: string,
+    brew-package: string,
+}
+
+export struct StoreEntry {
+    ecosystem: string,     // "python", "node", "rust", "brew"
+    name: string,
+    version: string,
+    size: string,
+    store-path: string,
+}
+
+export struct LogLine {
+    text: string,
+}
+
+// ── Main window ─────────────────────────────────────────────────────────────
+
+export component KongWindow inherits Window {
+    title: "KONG — Unified Dependency Manager";
+    min-width: 900px;
+    min-height: 600px;
+    preferred-width: 1100px;
+    preferred-height: 700px;
+
+    // ── Exposed data (set from Rust) ────────────────────────────────────
+    in property <[ProjectInfo]> projects: [];
+    in property <[ServiceInfo]> services: [];
+    in property <[StoreEntry]> store-items: [];
+    in property <[LogLine]> service-log-lines: [];
+    in property <string> status-message: "Ready";
+    in property <string> selected-project-name: "";
+    in-out property <int> active-tab: 0;
+
+    // ── Callbacks to Rust ───────────────────────────────────────────────
+    callback service-start(string, string);      // (service-name, project-name)
+    callback service-stop(string, string);       // (service-name, project-name)
+    callback service-start-all(string);          // (project-name)
+    callback service-stop-all(string);           // (project-name)
+    callback show-service-logs(string, string);  // (service-name, project-name)
+    callback refresh-data();
+    callback run-script(string, string);         // (script-name, project-name)
+    callback open-project-terminal(string);      // (project-path)
+    callback run-doctor();
+
+    VerticalBox {
+        padding: 0px;
+        spacing: 0px;
+
+        // ── Title bar ───────────────────────────────────────────────────
+        HorizontalBox {
+            padding-left: 16px;
+            padding-right: 16px;
+            padding-top: 8px;
+            padding-bottom: 8px;
+
+            Text {
+                text: "🦍 KONG";
+                font-size: 18px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            Text {
+                text: root.status-message;
+                font-size: 12px;
+                vertical-alignment: center;
+                opacity: 0.6;
+            }
+
+            Rectangle { width: 12px; }
+
+            Button {
+                text: "↻ Refresh";
+                clicked => { root.refresh-data(); }
+            }
+        }
+
+        // ── Tab widget ──────────────────────────────────────────────────
+        TabWidget {
+            current-index <=> root.active-tab;
+
+            // ═══════════════════════════════════════════════════════════════
+            // TAB 1: PROJECTS
+            // ═══════════════════════════════════════════════════════════════
+            Tab {
+                title: "Projects";
+
+                VerticalBox {
+                    padding: 16px;
+
+                    Text {
+                        text: "KONG-managed projects";
+                        font-size: 14px;
+                        font-weight: 600;
+                    }
+
+                    Rectangle { height: 8px; }
+
+                    if root.projects.length == 0 : Text {
+                        text: "No projects found. Run `kong rules` in a project directory first.";
+                        font-size: 13px;
+                        opacity: 0.5;
+                    }
+
+                    ListView {
+                        vertical-stretch: 1;
+                        for project[idx] in root.projects : Rectangle {
+                            height: 72px;
+                            border-width: 1px;
+                            border-color: #e0e0e0;
+                            border-radius: 6px;
+
+                            HorizontalBox {
+                                padding: 12px;
+
+                                VerticalBox {
+                                    spacing: 4px;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: project.name;
+                                        font-size: 14px;
+                                        font-weight: 600;
+                                    }
+                                    Text {
+                                        text: project.path;
+                                        font-size: 11px;
+                                        opacity: 0.5;
+                                    }
+                                    Text {
+                                        text: "Scripts: " + project.scripts;
+                                        font-size: 11px;
+                                        opacity: 0.7;
+                                    }
+                                }
+
+                                VerticalBox {
+                                    alignment: center;
+                                    spacing: 4px;
+                                    HorizontalBox {
+                                        spacing: 6px;
+                                        Button {
+                                            text: "▶ Terminal";
+                                            clicked => { root.open-project-terminal(project.path); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            // TAB 2: SERVICES
+            // ═══════════════════════════════════════════════════════════════
+            Tab {
+                title: "Services";
+
+                VerticalBox {
+                    padding: 16px;
+
+                    HorizontalBox {
+                        Text {
+                            text: "Background services";
+                            font-size: 14px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        Button {
+                            text: "▶ Start All";
+                            clicked => { root.service-start-all(""); }
+                        }
+
+                        Rectangle { width: 6px; }
+
+                        Button {
+                            text: "■ Stop All";
+                            clicked => { root.service-stop-all(""); }
+                        }
+                    }
+
+                    Rectangle { height: 8px; }
+
+                    if root.services.length == 0 : Text {
+                        text: "No services found. Projects with Brewfile (postgres, redis) will appear here.";
+                        font-size: 13px;
+                        opacity: 0.5;
+                    }
+
+                    ListView {
+                        vertical-stretch: 1;
+                        for svc[idx] in root.services : Rectangle {
+                            height: 60px;
+                            border-width: 1px;
+                            border-color: svc.status == "running" ? #4caf50 : #e0e0e0;
+                            border-radius: 6px;
+                            background: svc.status == "running" ? #e8f5e9 : transparent;
+
+                            HorizontalBox {
+                                padding: 12px;
+
+                                // Status indicator
+                                Rectangle {
+                                    width: 10px;
+                                    height: 10px;
+                                    y: (parent.height - self.height) / 2;
+                                    border-radius: 5px;
+                                    background: svc.status == "running" ? #4caf50 :
+                                               svc.status == "dead" ? #f44336 : #9e9e9e;
+                                }
+
+                                Rectangle { width: 12px; }
+
+                                VerticalBox {
+                                    spacing: 3px;
+                                    horizontal-stretch: 1;
+                                    HorizontalBox {
+                                        spacing: 8px;
+                                        Text {
+                                            text: svc.name;
+                                            font-size: 14px;
+                                            font-weight: 600;
+                                        }
+                                        Text {
+                                            text: "(" + svc.brew-package + ")";
+                                            font-size: 12px;
+                                            opacity: 0.5;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    HorizontalBox {
+                                        spacing: 16px;
+                                        Text {
+                                            text: "Status: " + svc.status;
+                                            font-size: 12px;
+                                        }
+                                        Text {
+                                            text: svc.port != "—" ? "Port: " + svc.port : "";
+                                            font-size: 12px;
+                                        }
+                                        Text {
+                                            text: svc.pid != "—" ? "PID: " + svc.pid : "";
+                                            font-size: 12px;
+                                            opacity: 0.6;
+                                        }
+                                        Text {
+                                            text: "Project: " + svc.project;
+                                            font-size: 12px;
+                                            opacity: 0.5;
+                                        }
+                                    }
+                                }
+
+                                HorizontalBox {
+                                    spacing: 6px;
+                                    alignment: center;
+
+                                    if svc.status != "running" : Button {
+                                        text: "▶ Start";
+                                        clicked => { root.service-start(svc.name, svc.project); }
+                                    }
+
+                                    if svc.status == "running" : Button {
+                                        text: "■ Stop";
+                                        clicked => { root.service-stop(svc.name, svc.project); }
+                                    }
+
+                                    Button {
+                                        text: "📋 Logs";
+                                        clicked => { root.show-service-logs(svc.name, svc.project); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Log viewer ──────────────────────────────────────
+                    Rectangle { height: 8px; }
+
+                    Text {
+                        text: "Service Logs";
+                        font-size: 13px;
+                        font-weight: 600;
+                    }
+
+                    Rectangle {
+                        height: 180px;
+                        border-width: 1px;
+                        border-color: #e0e0e0;
+                        border-radius: 6px;
+                        clip: true;
+
+                        ScrollView {
+                            VerticalBox {
+                                padding: 8px;
+                                spacing: 2px;
+                                alignment: start;
+
+                                for line in root.service-log-lines : Text {
+                                    text: line.text;
+                                    font-size: 11px;
+                                    font-family: "Menlo, Monaco, monospace";
+                                    wrap: no-wrap;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            // TAB 3: STORE
+            // ═══════════════════════════════════════════════════════════════
+            Tab {
+                title: "Store";
+
+                VerticalBox {
+                    padding: 16px;
+
+                    Text {
+                        text: "Global Store";
+                        font-size: 14px;
+                        font-weight: 600;
+                    }
+
+                    Rectangle { height: 8px; }
+
+                    // Column headers
+                    HorizontalBox {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        height: 28px;
+                        Text { text: "Ecosystem"; font-size: 12px; font-weight: 600; width: 80px; }
+                        Text { text: "Package"; font-size: 12px; font-weight: 600; horizontal-stretch: 1; }
+                        Text { text: "Version"; font-size: 12px; font-weight: 600; width: 120px; }
+                        Text { text: "Size"; font-size: 12px; font-weight: 600; width: 80px; }
+                    }
+
+                    Rectangle { height: 1px; background: #e0e0e0; }
+
+                    if root.store-items.length == 0 : Text {
+                        text: "Store is empty. Run `kong rules` + `kong use` in a project.";
+                        font-size: 13px;
+                        opacity: 0.5;
+                    }
+
+                    ListView {
+                        vertical-stretch: 1;
+                        for item[idx] in root.store-items : Rectangle {
+                            height: 32px;
+                            background: Math.mod(idx, 2) == 0 ? transparent : #f5f5f5;
+
+                            HorizontalBox {
+                                padding-left: 12px;
+                                padding-right: 12px;
+
+                                Text {
+                                    text: item.ecosystem;
+                                    font-size: 12px;
+                                    width: 80px;
+                                    vertical-alignment: center;
+                                    color: item.ecosystem == "python" ? #3776ab :
+                                           item.ecosystem == "node" ? #339933 :
+                                           item.ecosystem == "rust" ? #ce422b :
+                                           item.ecosystem == "brew" ? #fbb040 : #666666;
+                                    font-weight: 600;
+                                }
+                                Text {
+                                    text: item.name;
+                                    font-size: 12px;
+                                    horizontal-stretch: 1;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: item.version;
+                                    font-size: 12px;
+                                    width: 120px;
+                                    vertical-alignment: center;
+                                    opacity: 0.7;
+                                }
+                                Text {
+                                    text: item.size;
+                                    font-size: 12px;
+                                    width: 80px;
+                                    vertical-alignment: center;
+                                    opacity: 0.5;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            // TAB 4: PACKAGES (per-project view)
+            // ═══════════════════════════════════════════════════════════════
+            Tab {
+                title: "Packages";
+
+                VerticalBox {
+                    padding: 16px;
+
+                    Text {
+                        text: "Project Dependencies";
+                        font-size: 14px;
+                        font-weight: 600;
+                    }
+
+                    Rectangle { height: 4px; }
+
+                    Text {
+                        text: root.selected-project-name != "" ?
+                              "Showing packages for: " + root.selected-project-name :
+                              "Select a project to view its dependencies";
+                        font-size: 12px;
+                        opacity: 0.6;
+                    }
+
+                    Rectangle { height: 8px; }
+
+                    // Column headers
+                    HorizontalBox {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        height: 28px;
+                        Text { text: "Ecosystem"; font-size: 12px; font-weight: 600; width: 80px; }
+                        Text { text: "Package"; font-size: 12px; font-weight: 600; horizontal-stretch: 1; }
+                        Text { text: "Version"; font-size: 12px; font-weight: 600; width: 120px; }
+                        Text { text: "Store Path"; font-size: 12px; font-weight: 600; width: 200px; }
+                    }
+
+                    Rectangle { height: 1px; background: #e0e0e0; }
+
+                    // Re-use store-items for the selected project; Rust backend
+                    // filters by project when populating.
+                    // For now we share the model and filter in Rust.
+                    ListView {
+                        vertical-stretch: 1;
+                        for item[idx] in root.store-items : Rectangle {
+                            height: 32px;
+                            background: Math.mod(idx, 2) == 0 ? transparent : #f5f5f5;
+
+                            HorizontalBox {
+                                padding-left: 12px;
+                                padding-right: 12px;
+
+                                Text {
+                                    text: item.ecosystem;
+                                    font-size: 12px;
+                                    width: 80px;
+                                    vertical-alignment: center;
+                                    color: item.ecosystem == "python" ? #3776ab :
+                                           item.ecosystem == "node" ? #339933 :
+                                           item.ecosystem == "rust" ? #ce422b :
+                                           item.ecosystem == "brew" ? #fbb040 : #666666;
+                                    font-weight: 600;
+                                }
+                                Text {
+                                    text: item.name;
+                                    font-size: 12px;
+                                    horizontal-stretch: 1;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: item.version;
+                                    font-size: 12px;
+                                    width: 120px;
+                                    vertical-alignment: center;
+                                    opacity: 0.7;
+                                }
+                                Text {
+                                    text: item.store-path;
+                                    font-size: 10px;
+                                    width: 200px;
+                                    vertical-alignment: center;
+                                    opacity: 0.4;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ═══════════════════════════════════════════════════════════════
+            // TAB 5: DOCTOR
+            // ═══════════════════════════════════════════════════════════════
+            Tab {
+                title: "Doctor";
+
+                VerticalBox {
+                    padding: 16px;
+
+                    Text {
+                        text: "System Health";
+                        font-size: 14px;
+                        font-weight: 600;
+                    }
+
+                    Rectangle { height: 8px; }
+
+                    Button {
+                        text: "🩺 Run Diagnostics";
+                        clicked => { root.run-doctor(); }
+                    }
+
+                    Rectangle { height: 12px; }
+
+                    ScrollView {
+                        vertical-stretch: 1;
+                        VerticalBox {
+                            padding: 8px;
+                            spacing: 2px;
+                            alignment: start;
+
+                            for line in root.service-log-lines : Text {
+                                text: line.text;
+                                font-size: 12px;
+                                font-family: "Menlo, Monaco, monospace";
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -29,6 +29,8 @@ pub enum Commands {
     Service(ServiceCmd),
     /// Manage the central store
     Store(StoreCmd),
+    /// Open the KONG graphical interface
+    Gui(GuiCmd),
     /// Run diagnostic checks
     Doctor(DoctorCmd),
 }
@@ -87,6 +89,13 @@ pub enum StoreAction {
 
 #[derive(Parser)]
 pub struct DoctorCmd;
+
+#[derive(Parser)]
+pub struct GuiCmd {
+    /// Path to project directory (defaults to current directory)
+    #[arg(short, long)]
+    pub path: Option<PathBuf>,
+}
 
 #[derive(Parser)]
 pub struct CloneCmd {
