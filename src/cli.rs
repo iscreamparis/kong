@@ -29,6 +29,8 @@ pub enum Commands {
     Service(ServiceCmd),
     /// Manage the central store
     Store(StoreCmd),
+    /// Delete a project's KONG environment (RULEZ + junctions)
+    Delete(DeleteCmd),
     /// Open the KONG graphical interface
     Gui(GuiCmd),
     /// Run diagnostic checks
@@ -92,6 +94,13 @@ pub struct DoctorCmd;
 
 #[derive(Parser)]
 pub struct GuiCmd {
+    /// Path to project directory (defaults to current directory)
+    #[arg(short, long)]
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+pub struct DeleteCmd {
     /// Path to project directory (defaults to current directory)
     #[arg(short, long)]
     pub path: Option<PathBuf>,

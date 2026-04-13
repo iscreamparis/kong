@@ -139,6 +139,12 @@ downloads + verifies     →          global store (written once)
 | `kong run <script> --path <dir>` | Run a script in a different project directory |
 | `kong super <url> [dir]` | Clone + rules + use + run — full end-to-end setup & smoke test |
 | `kong super <url> -r build -r test` | Run only specific scripts after setup |
+| `kong service start [name]` | Start a service (or all) as a background daemon |
+| `kong service stop [name]` | Stop a running service (or all) gracefully |
+| `kong service status` | Show running services, ports, PIDs |
+| `kong service logs <name>` | Tail stdout/stderr of a service |
+| `kong delete [--path <dir>]` | Delete a project's KONG environment (RULEZ + junctions) |
+| `kong gui [--path <dir>]` | Open the native GUI (Slint, Cupertino style on macOS) |
 | `kong store path` | Print the global store path |
 | `kong doctor` | Check store integrity and environment health |
 
@@ -240,23 +246,24 @@ No pip. No npm. No brew. No conda. No rustup. Just KONG.
 - [x] **Lazy cargo build** — `kong run` auto-builds Rust binaries when the target is missing
 - [ ] **`kong super` parallel script execution** — run independent scripts concurrently
 
-### v0.5 — Service management ← **current**
-- [ ] **`kong service start <name>`** — start a service (postgres, redis) as a background daemon with pid tracking
-- [ ] **`kong service stop <name>`** — stop a running service gracefully
-- [ ] **`kong service status`** — show running services, ports, pids, uptime
-- [ ] **`kong service logs <name>`** — tail stdout/stderr of a running service
-- [ ] **`kong.rules` services section** — declare services alongside scripts; `kong use` knows what can be started
+### v0.5 — Service management ✅
+- [x] **`kong service start <name>`** — start a service (postgres, redis) as a background daemon with pid tracking
+- [x] **`kong service stop <name>`** — stop a running service gracefully (SIGTERM on unix)
+- [x] **`kong service status`** — show running services, ports, pids
+- [x] **`kong service logs <name>`** — tail stdout/stderr of a running service
+- [x] **`kong.rules` services section** — declare services alongside scripts; auto-inferred from brew packages
 - [ ] **Auto-start on `kong run`** — scripts can declare service dependencies; KONG starts them before running the script
 
-### v0.6 — GUI (Slint)
-- [ ] **`kong gui`** — native desktop window using [Slint](https://slint.dev/) (Cupertino style on macOS, Fluent on Windows)
-- [ ] **Projects tab** — list all KONG-managed projects, run/stop scripts, view status
-- [ ] **Services tab** — start/stop/restart services, see ports, health, live logs
-- [ ] **Store tab** — browse global store by ecosystem, see disk usage, clean unused packages
-- [ ] **Packages tab** — per-project dependency view with ecosystem filters (Python / Node / Rust / Brew)
-- [ ] **Doctor tab** — system health checks, one-click auto-fix
+### v0.6 — GUI (Slint) ✅
+- [x] **`kong gui`** — native desktop window using [Slint](https://slint.dev/) with Cupertino style (auto dark/light following system)
+- [x] **Projects tab** — list all KONG-managed projects, open terminal, delete environment
+- [x] **Services tab** — start/stop services, see ports/PIDs/status, view live logs
+- [x] **Store tab** — browse global store by ecosystem with disk usage per package
+- [x] **Packages tab** — per-project dependency view showing which deps are shared across projects
+- [x] **Doctor tab** — system health checks with diagnostic output
+- [x] **`kong delete`** — CLI command to remove a project's KONG environment (RULEZ + junctions)
 
-### v0.7 — Migration
+### v0.7 — Migration ← **current**
 - [ ] **`kong import`** — convert an existing project (with local `.venv`, `node_modules`, `.cargo`) to the KONG way. Moves already-installed packages into the global store instead of re-downloading them, then replaces the local copies with links.
 - [ ] **`kong eject`** — convert a KONG-managed project back to standalone. Copies packages from the store into real local directories so the project works without KONG.
 

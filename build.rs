@@ -2,7 +2,10 @@ use std::process::Command;
 
 fn main() {
     // ── Slint UI compilation ────────────────────────────────────────────────
-    slint_build::compile("ui/kong.slint").expect("Slint build failed");
+    let config = slint_build::CompilerConfiguration::new()
+        .with_style("cupertino".into());
+    slint_build::compile_with_config("ui/kong.slint", config)
+        .expect("Slint build failed");
 
     // ── Windows NSIS installer (release builds only) ────────────────────────
     // Only build the installer on Windows release builds.

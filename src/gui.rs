@@ -14,6 +14,53 @@ slint::include_modules!();
 use crate::config;
 use crate::store;
 
+/// A (name, version, ecosystem) -> list of project names mapping, used to compute cross-project usage.
+type DepIndex = std::collections::HashMap<(String, String, String), Vec<String>>;
+
+/// Build a cross-project dependency index: for each (ecosystem, name, version),
+/// which projects use it.
+fn build_dep_index(projects: &[(String, PathBuf)]) -> DepIndex {
+    let mut index: DepIndex = std::collections::HashMap::new();
+
+    for (proj_name, proj_path) in projects {
+        let rules = match config::read_rules(&proj_path.join("kong.rules")) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        if let Some(ref py) = rules.python {
+            for pkg in &py.packages {
+                index.entry(("python".into(), pkg.name.clone(), pkg.version.clone()))
+                    .or_default()
+                    .push(proj_name.clone());
+            }
+        }
+        if let Some(ref node) = rules.node {
+            for pkg in &node.packages {
+                index.entry(("node".into(), pkg.name.clone(), pkg.version.clone()))
+                    .or_default()
+                    .push(proj_name.clone());
+            }
+        }
+        if let Some(ref rs) = rules.rust {
+            for pkg in &rs.packages {
+                index.entry(("rust".into(), pkg.name.clone(), pkg.version.clone()))
+                    .or_default()
+                    .push(proj_name.clone());
+            }
+        }
+        if let Some(ref brew) = rules.brew {
+            for pkg in &brew.packages {
+                index.entry(("brew".into(), pkg.name.clone(), pkg.version.clone()))
+                    .or_default()
+                    .push(proj_name.clone());
+            }
+        }
+    }
+
+    index
+}
+
 /// Launch the GUI.
 pub fn launch(project_dir: Option<&Path>) -> Result<()> {
     let window = KongWindow::new()?;
@@ -154,8 +201,42 @@ pub fn launch(project_dir: Option<&Path>) -> Result<()> {
                     .iter()
                     .map(|l| LogLine { text: SharedString::from(l.as_str()) })
                     .collect();
-                win.set_service_log_lines(ModelRc::new(VecModel::from(model)));
+                win.set_doctor_log_lines(ModelRc::new(VecModel::from(model)));
                 win.set_status_message(SharedString::from("Doctor report ready"));
+            }
+        });
+    }
+
+    {
+        let w = window.as_weak();
+        let pd = project_dir.map(|p| p.to_path_buf());
+        window.on_delete_project(move |project_name| {
+            if let Some(win) = w.upgrade() {
+                let proj_dir = resolve_project_dir(&project_name);
+                // Clean RULEZ environment + project junctions
+                let env_dir = store::rulez_dir(&project_name).ok();
+                if let Some(ref ed) = env_dir {
+                    let _ = crate::link::clean_environments(ed);
+                }
+                let _ = crate::link::clean_project_junctions(&proj_dir);
+                // Remove the RULEZ directory for this project
+                if let Some(ed) = env_dir {
+                    let _ = std::fs::remove_dir_all(&ed);
+                }
+                win.set_status_message(SharedString::from(
+                    format!("✓ Deleted environment for {}", project_name)
+                ));
+                populate_all(&win, pd.as_deref());
+            }
+        });
+    }
+
+    {
+        let w = window.as_weak();
+        window.on_select_project(move |project_name| {
+            if let Some(win) = w.upgrade() {
+                win.set_selected_project_name(project_name.clone());
+                populate_packages(&win, &project_name);
             }
         });
     }
@@ -209,6 +290,12 @@ fn populate_all(window: &KongWindow, project_dir: Option<&Path>) {
 
     // Store tab
     populate_store(window);
+
+    // Packages tab — populate if a project is selected
+    let sel = window.get_selected_project_name();
+    if !sel.is_empty() {
+        populate_packages(window, &sel);
+    }
 }
 
 fn refresh_services(window: &KongWindow) {
@@ -320,6 +407,82 @@ fn populate_store(window: &KongWindow) {
     });
 
     window.set_store_items(ModelRc::new(VecModel::from(items)));
+}
+
+fn populate_packages(window: &KongWindow, project_name: &str) {
+    let projects = discover_projects();
+    let dep_index = build_dep_index(&projects);
+
+    // Find the selected project and its dependencies
+    let proj_path = projects
+        .iter()
+        .find(|(n, _)| n == project_name)
+        .map(|(_, p)| p.clone());
+
+    let proj_path = match proj_path {
+        Some(p) => p,
+        None => {
+            window.set_package_deps(ModelRc::new(VecModel::from(Vec::<PackageDep>::new())));
+            return;
+        }
+    };
+
+    let rules = match config::read_rules(&proj_path.join("kong.rules")) {
+        Ok(r) => r,
+        Err(_) => {
+            window.set_package_deps(ModelRc::new(VecModel::from(Vec::<PackageDep>::new())));
+            return;
+        }
+    };
+
+    let mut deps: Vec<PackageDep> = Vec::new();
+
+    // Helper closure to add deps from a section
+    let mut add_deps = |ecosystem: &str, packages: &[crate::config::PackageEntry]| {
+        for pkg in packages {
+            let key = (ecosystem.to_string(), pkg.name.clone(), pkg.version.clone());
+            let used_by = dep_index.get(&key).cloned().unwrap_or_default();
+            deps.push(PackageDep {
+                ecosystem: SharedString::from(ecosystem),
+                name: SharedString::from(pkg.name.as_str()),
+                version: SharedString::from(pkg.version.as_str()),
+                used_by_count: used_by.len() as i32,
+                used_by: SharedString::from(used_by.join(", ").as_str()),
+            });
+        }
+    };
+
+    if let Some(ref py) = rules.python {
+        add_deps("python", &py.packages);
+    }
+    if let Some(ref node) = rules.node {
+        add_deps("node", &node.packages);
+    }
+    if let Some(ref rs) = rules.rust {
+        add_deps("rust", &rs.packages);
+    }
+    if let Some(ref brew) = rules.brew {
+        // Convert BrewEntry → PackageEntry-like for the closure
+        let brew_as_pkg: Vec<crate::config::PackageEntry> = brew.packages.iter().map(|b| {
+            crate::config::PackageEntry {
+                name: b.name.clone(),
+                version: b.version.clone(),
+                hash: b.hash.clone(),
+                store_path: b.store_path.clone(),
+                source_url: b.source_url.clone(),
+            }
+        }).collect();
+        add_deps("brew", &brew_as_pkg);
+    }
+
+    // Sort: shared deps first (descending by usage), then alphabetically
+    deps.sort_by(|a, b| {
+        b.used_by_count.cmp(&a.used_by_count)
+            .then(a.ecosystem.cmp(&b.ecosystem))
+            .then(a.name.cmp(&b.name))
+    });
+
+    window.set_package_deps(ModelRc::new(VecModel::from(deps)));
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

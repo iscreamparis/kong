@@ -29,6 +29,14 @@ export struct StoreEntry {
     store-path: string,
 }
 
+export struct PackageDep {
+    ecosystem: string,
+    name: string,
+    version: string,
+    used-by-count: int,    // how many projects use this dep
+    used-by: string,       // comma-separated project names
+}
+
 export struct LogLine {
     text: string,
 }
@@ -46,7 +54,9 @@ export component KongWindow inherits Window {
     in property <[ProjectInfo]> projects: [];
     in property <[ServiceInfo]> services: [];
     in property <[StoreEntry]> store-items: [];
+    in property <[PackageDep]> package-deps: [];
     in property <[LogLine]> service-log-lines: [];
+    in property <[LogLine]> doctor-log-lines: [];
     in property <string> status-message: "Ready";
     in property <string> selected-project-name: "";
     in-out property <int> active-tab: 0;
@@ -60,6 +70,8 @@ export component KongWindow inherits Window {
     callback refresh-data();
     callback run-script(string, string);         // (script-name, project-name)
     callback open-project-terminal(string);      // (project-path)
+    callback delete-project(string);             // (project-name)
+    callback select-project(string);             // (project-name) — for packages tab
     callback run-doctor();
 
     VerticalBox {
@@ -92,7 +104,8 @@ export component KongWindow inherits Window {
             Rectangle { width: 12px; }
 
             Button {
-                text: "↻ Refresh";
+                text: "Refresh";
+                min-height: 28px;
                 clicked => { root.refresh-data(); }
             }
         }
@@ -127,17 +140,19 @@ export component KongWindow inherits Window {
                     ListView {
                         vertical-stretch: 1;
                         for project[idx] in root.projects : Rectangle {
-                            height: 72px;
+                            height: 100px;
                             border-width: 1px;
                             border-color: #e0e0e0;
                             border-radius: 6px;
 
                             HorizontalBox {
                                 padding: 12px;
+                                spacing: 12px;
 
                                 VerticalBox {
-                                    spacing: 4px;
+                                    spacing: 3px;
                                     horizontal-stretch: 1;
+                                    alignment: center;
                                     Text {
                                         text: project.name;
                                         font-size: 14px;
@@ -147,11 +162,13 @@ export component KongWindow inherits Window {
                                         text: project.path;
                                         font-size: 11px;
                                         opacity: 0.5;
+                                        overflow: elide;
                                     }
                                     Text {
                                         text: "Scripts: " + project.scripts;
                                         font-size: 11px;
                                         opacity: 0.7;
+                                        overflow: elide;
                                     }
                                 }
 
@@ -159,10 +176,16 @@ export component KongWindow inherits Window {
                                     alignment: center;
                                     spacing: 4px;
                                     HorizontalBox {
-                                        spacing: 6px;
+                                        spacing: 4px;
                                         Button {
-                                            text: "▶ Terminal";
+                                            text: "Terminal";
+                                            min-height: 30px;
                                             clicked => { root.open-project-terminal(project.path); }
+                                        }
+                                        Button {
+                                            text: "Delete";
+                                            min-height: 30px;
+                                            clicked => { root.delete-project(project.name); }
                                         }
                                     }
                                 }
@@ -192,14 +215,16 @@ export component KongWindow inherits Window {
                         Rectangle { horizontal-stretch: 1; }
 
                         Button {
-                            text: "▶ Start All";
+                            text: "Start All";
+                            min-height: 28px;
                             clicked => { root.service-start-all(""); }
                         }
 
                         Rectangle { width: 6px; }
 
                         Button {
-                            text: "■ Stop All";
+                            text: "Stop All";
+                            min-height: 28px;
                             clicked => { root.service-stop-all(""); }
                         }
                     }
@@ -215,7 +240,7 @@ export component KongWindow inherits Window {
                     ListView {
                         vertical-stretch: 1;
                         for svc[idx] in root.services : Rectangle {
-                            height: 60px;
+                            height: 90px;
                             border-width: 1px;
                             border-color: svc.status == "running" ? #4caf50 : #e0e0e0;
                             border-radius: 6px;
@@ -223,22 +248,24 @@ export component KongWindow inherits Window {
 
                             HorizontalBox {
                                 padding: 12px;
+                                spacing: 10px;
 
                                 // Status indicator
-                                Rectangle {
-                                    width: 10px;
-                                    height: 10px;
-                                    y: (parent.height - self.height) / 2;
-                                    border-radius: 5px;
-                                    background: svc.status == "running" ? #4caf50 :
-                                               svc.status == "dead" ? #f44336 : #9e9e9e;
+                                VerticalBox {
+                                    alignment: center;
+                                    Rectangle {
+                                        width: 10px;
+                                        height: 10px;
+                                        border-radius: 5px;
+                                        background: svc.status == "running" ? #4caf50 :
+                                                   svc.status == "dead" ? #f44336 : #9e9e9e;
+                                    }
                                 }
 
-                                Rectangle { width: 12px; }
-
                                 VerticalBox {
-                                    spacing: 3px;
+                                    spacing: 4px;
                                     horizontal-stretch: 1;
+                                    alignment: center;
                                     HorizontalBox {
                                         spacing: 8px;
                                         Text {
@@ -257,42 +284,47 @@ export component KongWindow inherits Window {
                                         spacing: 16px;
                                         Text {
                                             text: "Status: " + svc.status;
-                                            font-size: 12px;
+                                            font-size: 11px;
                                         }
                                         Text {
-                                            text: svc.port != "—" ? "Port: " + svc.port : "";
-                                            font-size: 12px;
+                                            text: svc.port != "\u{2014}" ? "Port: " + svc.port : "";
+                                            font-size: 11px;
                                         }
                                         Text {
-                                            text: svc.pid != "—" ? "PID: " + svc.pid : "";
-                                            font-size: 12px;
+                                            text: svc.pid != "\u{2014}" ? "PID: " + svc.pid : "";
+                                            font-size: 11px;
                                             opacity: 0.6;
                                         }
                                         Text {
                                             text: "Project: " + svc.project;
-                                            font-size: 12px;
+                                            font-size: 11px;
                                             opacity: 0.5;
                                         }
                                     }
                                 }
 
-                                HorizontalBox {
-                                    spacing: 6px;
+                                VerticalBox {
                                     alignment: center;
+                                    HorizontalBox {
+                                        spacing: 4px;
 
-                                    if svc.status != "running" : Button {
-                                        text: "▶ Start";
-                                        clicked => { root.service-start(svc.name, svc.project); }
-                                    }
+                                        if svc.status != "running" : Button {
+                                            text: "Start";
+                                            min-height: 30px;
+                                            clicked => { root.service-start(svc.name, svc.project); }
+                                        }
 
-                                    if svc.status == "running" : Button {
-                                        text: "■ Stop";
-                                        clicked => { root.service-stop(svc.name, svc.project); }
-                                    }
+                                        if svc.status == "running" : Button {
+                                            text: "Stop";
+                                            min-height: 30px;
+                                            clicked => { root.service-stop(svc.name, svc.project); }
+                                        }
 
-                                    Button {
-                                        text: "📋 Logs";
-                                        clicked => { root.show-service-logs(svc.name, svc.project); }
+                                        Button {
+                                            text: "Logs";
+                                            min-height: 30px;
+                                            clicked => { root.show-service-logs(svc.name, svc.project); }
+                                        }
                                     }
                                 }
                             }
@@ -354,11 +386,11 @@ export component KongWindow inherits Window {
                     HorizontalBox {
                         padding-left: 12px;
                         padding-right: 12px;
-                        height: 28px;
-                        Text { text: "Ecosystem"; font-size: 12px; font-weight: 600; width: 80px; }
-                        Text { text: "Package"; font-size: 12px; font-weight: 600; horizontal-stretch: 1; }
-                        Text { text: "Version"; font-size: 12px; font-weight: 600; width: 120px; }
-                        Text { text: "Size"; font-size: 12px; font-weight: 600; width: 80px; }
+                        min-height: 40px;
+                        Text { text: "Ecosystem"; font-size: 12px; font-weight: 600; width: 80px; vertical-alignment: center; }
+                        Text { text: "Package"; font-size: 12px; font-weight: 600; horizontal-stretch: 1; vertical-alignment: center; }
+                        Text { text: "Version"; font-size: 12px; font-weight: 600; width: 120px; vertical-alignment: center; }
+                        Text { text: "Size"; font-size: 12px; font-weight: 600; width: 80px; vertical-alignment: center; }
                     }
 
                     Rectangle { height: 1px; background: #e0e0e0; }
@@ -372,7 +404,7 @@ export component KongWindow inherits Window {
                     ListView {
                         vertical-stretch: 1;
                         for item[idx] in root.store-items : Rectangle {
-                            height: 32px;
+                            height: 40px;
                             background: Math.mod(idx, 2) == 0 ? transparent : #f5f5f5;
 
                             HorizontalBox {
@@ -417,7 +449,7 @@ export component KongWindow inherits Window {
             }
 
             // ═══════════════════════════════════════════════════════════════
-            // TAB 4: PACKAGES (per-project view)
+            // TAB 4: PACKAGES (per-project dependency view with cross-project usage)
             // ═══════════════════════════════════════════════════════════════
             Tab {
                 title: "Packages";
@@ -433,12 +465,25 @@ export component KongWindow inherits Window {
 
                     Rectangle { height: 4px; }
 
-                    Text {
-                        text: root.selected-project-name != "" ?
-                              "Showing packages for: " + root.selected-project-name :
-                              "Select a project to view its dependencies";
-                        font-size: 12px;
-                        opacity: 0.6;
+                    // Project selector
+                    HorizontalBox {
+                        spacing: 8px;
+                        Text {
+                            text: root.selected-project-name != "" ?
+                                  "Showing: " + root.selected-project-name :
+                                  "Select a project:";
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            opacity: 0.6;
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        for project in root.projects : Button {
+                            text: project.name;
+                            min-height: 28px;
+                            clicked => { root.select-project(project.name); }
+                        }
                     }
 
                     Rectangle { height: 8px; }
@@ -447,22 +492,28 @@ export component KongWindow inherits Window {
                     HorizontalBox {
                         padding-left: 12px;
                         padding-right: 12px;
-                        height: 28px;
-                        Text { text: "Ecosystem"; font-size: 12px; font-weight: 600; width: 80px; }
-                        Text { text: "Package"; font-size: 12px; font-weight: 600; horizontal-stretch: 1; }
-                        Text { text: "Version"; font-size: 12px; font-weight: 600; width: 120px; }
-                        Text { text: "Store Path"; font-size: 12px; font-weight: 600; width: 200px; }
+                        min-height: 40px;
+                        Text { text: "Ecosystem"; font-size: 12px; font-weight: 600; width: 80px; vertical-alignment: center; }
+                        Text { text: "Package"; font-size: 12px; font-weight: 600; horizontal-stretch: 1; vertical-alignment: center; }
+                        Text { text: "Version"; font-size: 12px; font-weight: 600; width: 100px; vertical-alignment: center; }
+                        Text { text: "Used by"; font-size: 12px; font-weight: 600; width: 60px; vertical-alignment: center; }
+                        Text { text: "Projects"; font-size: 12px; font-weight: 600; width: 200px; vertical-alignment: center; }
                     }
 
                     Rectangle { height: 1px; background: #e0e0e0; }
 
-                    // Re-use store-items for the selected project; Rust backend
-                    // filters by project when populating.
-                    // For now we share the model and filter in Rust.
+                    if root.package-deps.length == 0 : Text {
+                        text: root.selected-project-name == "" ?
+                              "Select a project above to view its dependencies." :
+                              "No dependencies found for this project.";
+                        font-size: 13px;
+                        opacity: 0.5;
+                    }
+
                     ListView {
                         vertical-stretch: 1;
-                        for item[idx] in root.store-items : Rectangle {
-                            height: 32px;
+                        for dep[idx] in root.package-deps : Rectangle {
+                            height: 40px;
                             background: Math.mod(idx, 2) == 0 ? transparent : #f5f5f5;
 
                             HorizontalBox {
@@ -470,35 +521,44 @@ export component KongWindow inherits Window {
                                 padding-right: 12px;
 
                                 Text {
-                                    text: item.ecosystem;
+                                    text: dep.ecosystem;
                                     font-size: 12px;
                                     width: 80px;
                                     vertical-alignment: center;
-                                    color: item.ecosystem == "python" ? #3776ab :
-                                           item.ecosystem == "node" ? #339933 :
-                                           item.ecosystem == "rust" ? #ce422b :
-                                           item.ecosystem == "brew" ? #fbb040 : #666666;
+                                    color: dep.ecosystem == "python" ? #3776ab :
+                                           dep.ecosystem == "node" ? #339933 :
+                                           dep.ecosystem == "rust" ? #ce422b :
+                                           dep.ecosystem == "brew" ? #fbb040 : #666666;
                                     font-weight: 600;
                                 }
                                 Text {
-                                    text: item.name;
+                                    text: dep.name;
                                     font-size: 12px;
                                     horizontal-stretch: 1;
                                     vertical-alignment: center;
                                 }
                                 Text {
-                                    text: item.version;
+                                    text: dep.version;
                                     font-size: 12px;
-                                    width: 120px;
+                                    width: 100px;
                                     vertical-alignment: center;
                                     opacity: 0.7;
                                 }
                                 Text {
-                                    text: item.store-path;
-                                    font-size: 10px;
+                                    text: dep.used-by-count;
+                                    font-size: 12px;
+                                    width: 60px;
+                                    vertical-alignment: center;
+                                    font-weight: dep.used-by-count > 1 ? 700 : 400;
+                                    color: dep.used-by-count > 1 ? #2196f3 : #666666;
+                                }
+                                Text {
+                                    text: dep.used-by;
+                                    font-size: 11px;
                                     width: 200px;
                                     vertical-alignment: center;
-                                    opacity: 0.4;
+                                    opacity: 0.5;
+                                    overflow: elide;
                                 }
                             }
                         }
@@ -524,7 +584,8 @@ export component KongWindow inherits Window {
                     Rectangle { height: 8px; }
 
                     Button {
-                        text: "🩺 Run Diagnostics";
+                        text: "Run Diagnostics";
+                        min-height: 28px;
                         clicked => { root.run-doctor(); }
                     }
 
@@ -537,7 +598,7 @@ export component KongWindow inherits Window {
                             spacing: 2px;
                             alignment: start;
 
-                            for line in root.service-log-lines : Text {
+                            for line in root.doctor-log-lines : Text {
                                 text: line.text;
                                 font-size: 12px;
                                 font-family: "Menlo, Monaco, monospace";

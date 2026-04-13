@@ -336,6 +336,23 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|| std::env::current_dir().unwrap());
             gui::launch(Some(&project_dir))?;
         }
+        Commands::Delete(cmd) => {
+            let project_dir = cmd.path
+                .unwrap_or_else(|| std::env::current_dir().unwrap());
+            let project_name = project_dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "project".to_string());
+            let env_dir = store::rulez_dir(&project_name)?;
+            info!(project = %project_name, "Deleting KONG environment");
+            link::clean_environments(&env_dir)?;
+            link::clean_project_junctions(&project_dir)?;
+            if env_dir.exists() {
+                std::fs::remove_dir_all(&env_dir)?;
+                info!(path = %env_dir.display(), "Removed RULEZ directory");
+            }
+            info!("✓ Deleted environment for {}", project_name);
+        }
     }
 
     Ok(())
