@@ -4,14 +4,14 @@
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/iscreamparis/kong/blob/main/LICENSE-MIT)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
-[![Platform: Windows](https://img.shields.io/badge/platform-Windows-blue.svg)]()
+[![Platform: Windows + macOS](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue.svg)]()
 [![Release](https://img.shields.io/github/v/release/iscreamparis/kong?include_prereleases&label=download)](https://github.com/iscreamparis/kong/releases)
 
 ---
 
-KONG is a standalone CLI that eliminates duplicated dependencies across all your projects. Every package lives once on disk — shared by hard links and NTFS junctions. Your project sees a normal `.venv`, `node_modules`, and `.cargo` folder. Nothing changes for your tools. Everything changes for your disk.
+KONG is a standalone CLI that eliminates duplicated dependencies across all your projects. Every package lives once on disk — shared by hard links and symlinks. Your project sees a normal `.venv`, `node_modules`, and `.cargo` folder. Nothing changes for your tools. Everything changes for your disk.
 
-**No pip. No npm. No cargo install. No external package managers at all.** KONG talks directly to PyPI, the npm registry, and crates.io — in-house, in Rust.
+**No pip. No npm. No cargo install. No brew. No external package managers at all.** KONG talks directly to PyPI, the npm registry, crates.io, and GitHub Container Registry (for Homebrew bottles) — in-house, in Rust.
 
 ---
 
@@ -27,9 +27,21 @@ pnpm proved this model works for Node.js. KONG extends it to all three ecosystem
 
 ## Install
 
+### Windows
+
 Download the installer from the [Releases page](https://github.com/iscreamparis/kong/releases) and run it. It drops `kong.exe` into `C:\kong\`, creates the store directory, and adds it to your system PATH.
 
-> Linux and macOS builds are on the [roadmap](#roadmap).
+### macOS
+
+```bash
+# Build from source (requires Rust toolchain)
+git clone https://github.com/iscreamparis/kong
+cd kong
+cargo build --release
+cp target/release/kong ~/.local/bin/
+```
+
+The store lives at `~/Library/Application Support/kong/`. On macOS, KONG uses symlinks instead of NTFS junctions.
 
 ---
 
@@ -37,23 +49,20 @@ Download the installer from the [Releases page](https://github.com/iscreamparis/
 
 KONG manages its own build dependencies — including the Rust toolchain. No `rustup` required.
 
-```powershell
+```bash
 kong clone https://github.com/iscreamparis/kong
 cd kong
 kong rules
 kong use kong.rules
-. .\.rust-toolchain\activate.ps1   # adds cargo + rustc to current console
 cargo build --release
-Copy-Item target\release\kong.exe C:\kong\kong.exe
+cp target/release/kong ~/.local/bin/kong
 ```
-
-> The activation script scopes the toolchain to the current console only — no system-wide changes.
 
 ---
 
 ## Quick Start
 
-```powershell
+```bash
 # 1. Go to your project
 cd my-project
 
@@ -63,18 +72,22 @@ kong rules
 # 3. Wire up .venv / node_modules / .cargo in the project directory
 kong use kong.rules
 
-# 4. Activate the Rust toolchain (current console only)
-. .\.rust-toolchain\activate.ps1
-
-# 5. Work normally — your tools see nothing different
+# 4. Work normally — your tools see nothing different
 python src/app.py
 node src/index.js
 cargo build --release
 
-# 6. Run scripts defined in package.json or pyproject.toml
+# 5. Run scripts defined in package.json or pyproject.toml
 kong run dev
 kong run build
 kong run test
+```
+
+Or do it all in one shot:
+
+```bash
+# Clone, install everything, and run smoke tests
+kong super https://github.com/owner/repo -r build -r test
 ```
 
 Second project using the same packages? `kong rules` + `kong use` — instant, no downloads, just links.
@@ -86,24 +99,27 @@ Second project using the same packages? `kong rules` + `kong use` — instant, n
 ```
 kong rules                          kong use kong.rules
 ─────────────────                   ───────────────────────────────
-reads manifests          →          creates junctions / hard links
+reads manifests          →          creates symlinks / hard links
   requirements.txt                    .venv/          → store/.venv
   package.json                        node_modules/   → store/node_modules
   Cargo.lock                          .cargo/config   → src replacement
+  Brewfile                            brew bottles    → store/brew/
 
 queries registries       →          your tools run unchanged
-  PyPI JSON API                       python, node, cargo, vite...
-  npm registry
+  PyPI JSON API                       python, node, cargo, vite,
+  npm registry                        jq, psql, redis-server...
   crates.io
+  GHCR (Homebrew bottles)
 
 downloads + verifies     →          global store (written once)
-  SHA-256 checked                     ~/.kong/store/
+  SHA-256 checked                     ~/Library/Application Support/kong/store/
   hard links shared                   ├── python/libs/numpy-2.2.4/
                                       ├── node/libs/vite-6.3.1/
-                                      └── rust/crates/tokio-1.44.2/
+                                      ├── rust/crates/tokio-1.44.2/
+                                      └── brew/jq-1.7.1/
 ```
 
-**The key insight:** KONG creates NTFS junctions from your project directory into its central store. Vite, Python, Node.js, and Cargo all find their packages by walking up the filesystem — exactly as they would with a real local install. No wrappers. No shims. No `PATH` tricks.
+**The key insight:** KONG creates symlinks (macOS/Linux) or NTFS junctions (Windows) from your project directory into its central store. Vite, Python, Node.js, and Cargo all find their packages by walking up the filesystem — exactly as they would with a real local install. Homebrew bottles are downloaded directly from GHCR and injected into `PATH` at runtime. No wrappers. No shims.
 
 ---
 
@@ -121,6 +137,8 @@ downloads + verifies     →          global store (written once)
 | `kong run <script>` | Run a script from `package.json` or `pyproject.toml` |
 | `kong run <script> -- <args>` | Pass extra arguments to the script |
 | `kong run <script> --path <dir>` | Run a script in a different project directory |
+| `kong super <url> [dir]` | Clone + rules + use + run — full end-to-end setup & smoke test |
+| `kong super <url> -r build -r test` | Run only specific scripts after setup |
 | `kong store path` | Print the global store path |
 | `kong doctor` | Check store integrity and environment health |
 
@@ -134,8 +152,7 @@ downloads + verifies     →          global store (written once)
 |-----------|--------|--------------------|
 | Python | `requirements.txt`, `pyproject.toml` | `uv.lock`, `poetry.lock`, `Pipfile.lock` |
 | Node.js | `package.json` | `package-lock.json`, `pnpm-lock.yaml` |
-| Rust | `Cargo.toml` | `Cargo.lock` ✓ |
-
+| Rust | `Cargo.toml` | `Cargo.lock` ✓ || Homebrew | `Brewfile` | — (fetches latest bottles from GHCR) |
 ---
 
 ## The Store
@@ -143,7 +160,7 @@ downloads + verifies     →          global store (written once)
 Everything lives in a single content-addressable store:
 
 ```
-~/.kong/                              (C:\kong\ on Windows)
+~/Library/Application Support/kong/   (macOS)
 ├── store/
 │   ├── python/
 │   │   ├── runtime/3.10.20/         ← KONG-managed Python interpreter
@@ -154,17 +171,21 @@ Everything lives in a single content-addressable store:
 │   │   ├── runtime/24.14.1/         ← KONG-managed Node.js
 │   │   └── libs/
 │   │       └── vite-6.3.1/
-│   └── rust/
-│       ├── toolchain/1.94.1/        ← KONG-managed rustc + cargo
-│       └── crates/
-│           └── tokio-1.44.2/
+│   ├── rust/
+│   │   ├── toolchain/1.94.1/        ← KONG-managed rustc + cargo
+│   │   └── crates/
+│   │       └── tokio-1.44.2/
+│   └── brew/
+│       ├── jq-1.7.1/               ← Homebrew bottles from GHCR
+│       ├── postgresql@17-17.5/
+│       └── redis-7.4.3/
 └── RULEZ/
     └── my-project/                  ← wired environments per project
         ├── .venv/
         └── node_modules/
 ```
 
-Packages are stored **once** and **hard-linked** into every project that needs them. Cross-drive projects (e.g. source on `Q:`, store on `C:`) use NTFS junctions.
+Packages are stored **once** and **hard-linked** into every project that needs them.
 
 ---
 
@@ -172,50 +193,79 @@ Packages are stored **once** and **hard-linked** into every project that needs t
 
 [DummyKong](https://github.com/iscreamparis/DummyKong) is KONG's reference test project: a Flask backend + Vite/Vue frontend + Rust fractal renderer, all managed by KONG.
 
-```powershell
-git clone https://github.com/iscreamparis/DummyKong
-cd DummyKong
-kong rules          # downloads Flask, Vue, fractal crates — all to global store
-kong use kong.rules # wires .venv, node_modules, .cargo into project dir
-.\run.ps1           # starts Flask :5000 + Vite :5173 + renders ASCII fractal
+```bash
+# One command does everything: clone → rules → use → run
+kong super https://github.com/iscreamparis/DummyKong -r build -r fractal
 ```
 
-No pip. No npm. No conda. No rustup. Just KONG.
+Or step by step:
+
+```bash
+git clone https://github.com/iscreamparis/DummyKong
+cd DummyKong
+kong rules              # downloads Flask, Vue, Rust crates, brew bottles — all to global store
+kong use kong.rules     # wires .venv, node_modules, brew bins into project dir
+kong run backend        # starts Flask on :5000 (uses Postgres + Redis via KONG-managed bottles)
+kong run dev            # starts Vite on :5173
+kong run fractal        # renders ASCII Mandelbrot (auto-builds Rust binary)
+kong run health         # checks Postgres/Redis connectivity via jq
+```
+
+DummyKong uses a `Brewfile` for system dependencies (`postgresql@17`, `redis`, `jq`) — KONG downloads the bottles directly from GHCR, no `brew` CLI needed.
+
+No pip. No npm. No brew. No conda. No rustup. Just KONG.
 
 ---
 
 ## Roadmap
 
-### v0.2 — Critical fixes
-- [ ] **Node.js bin scripts** — link CLI tools into `node_modules/.bin/` so `npx`, `tsc`, `eslint` etc. work
-- [ ] **Proper wheel selection** — parse wheel filenames (PEP 427) instead of substring matching; check `requires_python`
+### v0.2 — Cross-platform + critical fixes ✅
+- [x] **macOS / Apple Silicon support** — symlinks instead of NTFS junctions, platform-aware store path, arm64 wheel selection
+- [x] **Node.js bin scripts** — link CLI tools into `node_modules/.bin/` so `vite`, `tsc`, `eslint` etc. work via `kong run`
+- [x] **Architecture-aware wheel selection** — correctly pick arm64 wheels on Apple Silicon (any compatible macOS version)
+- [ ] **Proper wheel selection** — full PEP 427 filename parsing; check `requires_python`
 - [ ] **Transitive dependency cycle detection** — prevent `kong rules` from hanging on circular deps
 - [ ] **Download retry** — retry failed downloads before giving up
 
-### v0.3 — Migration
-- [ ] **`kong import`** — convert an existing project (with local `.venv`, `node_modules`, `.cargo`) to the KONG way. Moves already-installed packages into the global store instead of re-downloading them, then replaces the local copies with links.
-- [ ] **`kong eject`** — convert a KONG-managed project back to standalone. Copies packages from the store into real local directories so the project works without KONG. (We hope nobody uses this, but it should always be an option.)
+### v0.3 — Homebrew / system dependencies ✅
+- [x] **`Brewfile` support** — `kong rules` detects `Brewfile`, resolves formulas + transitive deps via Homebrew API
+- [x] **Direct GHCR bottle downloads** — downloads pre-built bottles from GitHub Container Registry, no `brew` CLI needed
+- [x] **Mach-O fixup** — rewrites `@@HOMEBREW_PREFIX@@` placeholders in binaries + codesigns for macOS Sequoia
+- [x] **BFS transitive deps** — walks the full dependency tree so `psql`, `redis-server`, `jq` all get their shared libs
+- [x] **Runtime PATH/lib injection** — `kong run` injects brew `bin/` and `lib/` into the script environment automatically
+- [ ] **Service management** — start/stop services (postgres, redis) as part of `kong run`
+- [ ] **`ca-certificates` bottle** — ARM64 Sequoia bottle tag not yet available upstream
 
-### v0.4 — Performance
+### v0.4 — End-to-end workflow ✅
+- [x] **`kong super <url>`** — one command to clone, generate rules, set up environments, and run scripts
+- [x] **Lazy cargo build** — `kong run` auto-builds Rust binaries when the target is missing
+- [ ] **`kong super` parallel script execution** — run independent scripts concurrently
+
+### v0.5 — Migration
+- [ ] **`kong import`** — convert an existing project (with local `.venv`, `node_modules`, `.cargo`) to the KONG way. Moves already-installed packages into the global store instead of re-downloading them, then replaces the local copies with links.
+- [ ] **`kong eject`** — convert a KONG-managed project back to standalone. Copies packages from the store into real local directories so the project works without KONG.
+
+### v0.6 — Performance
 - [ ] **Parallel downloads** — all packages fetched concurrently (currently sequential)
 - [ ] **Progress bars** — `indicatif` integration for long downloads
 - [ ] **Resume on failure** — partial downloads restart from where they stopped
 
-### v0.5 — Broader compatibility
+### v0.7 — Broader compatibility
 - [ ] **Python resolver** — resolve `>=` version constraints without a lockfile
 - [ ] **`kong shell`** — drop into an activated shell for a project
 - [ ] **`kong add <pkg>`** — add a package and update `kong.rules` in one step
-- [ ] **`kong store move <path>`** — move the global store to another disk (e.g. when the current drive is full)
-- [ ] **`kong store add <path>`** — add a secondary store on another disk; KONG picks the store with free space automatically
+- [ ] **`kong store move <path>`** — move the global store to another disk
+- [ ] **`kong store add <path>`** — add a secondary store on another disk
 
-### v0.6 — Git integration (lite)
+### v0.8 — Git integration (lite)
 - [x] **`kong clone <url>`** — clone a repo, then `kong rules` + `kong use` separately (or `--setup` for all-in-one)
 - [ ] **`kong login`** — authenticate with GitHub/GitLab for private repos
 - [ ] Bundles a minimal `git` client (clone, fetch, pull) via the `gitoxide` / `gix` Rust crate — no system git required
 
 ### v1.0 — Production
-- [ ] **Linux / macOS support** — symlinks instead of junctions, platform-specific wheel/binary selection, CI pipeline for cross-platform builds
-- [ ] private registry support
+- [x] **macOS support** — symlinks, platform-specific selection, GHCR bottles
+- [ ] **Linux support** — CI pipeline for cross-platform builds
+- [ ] Private registry support (PyPI, npm, crates.io)
 - [ ] Windows installer with proper PATH management (NSIS → WiX)
 - [ ] `kong doctor` full report with auto-fix suggestions
 
@@ -223,10 +273,10 @@ No pip. No npm. No conda. No rustup. Just KONG.
 
 ## Design Principles
 
-- **No external package managers.** KONG never calls `pip`, `npm`, `yarn`, `pnpm`, or `cargo install` as subprocesses. All registry communication is in-house via `reqwest`.
+- **No external package managers.** KONG never calls `pip`, `npm`, `yarn`, `pnpm`, `cargo install`, or `brew` as subprocesses. All registry communication is in-house via `reqwest`.
 - **Idempotent.** Every command is safe to re-run. Already in store? Skip the download. Link already exists? Skip the link.
 - **Transparent.** Your project directory looks exactly like a normal project to every tool. KONG is invisible at runtime.
-- **Windows-only (for now).** NTFS junctions + hard links. Long paths. `\\?\` prefixes where needed. Linux/macOS support is on the roadmap.
+- **Cross-platform.** Windows (NTFS junctions + hard links) and macOS (symlinks + hard links). Linux support coming.
 
 ---
 
@@ -241,18 +291,23 @@ KONG is early-stage software. Here's what doesn't work yet — no surprises.
 - **Version ranges not resolved.** `>=1.0` or `~=2.3` in `requirements.txt` are skipped — only exact pins (`==`) and lockfile versions are handled. Use a lockfile for reliable results.
 
 ### Node.js
-- **Bin scripts not linked.** `node_modules/.bin/` is not populated. CLI tools installed as npm packages (`tsc`, `eslint`, `jest`, `vite`) won't be found by `npx` or npm scripts. `kong run` works around this for scripts defined in `package.json`.
+- ~~**Bin scripts not linked.**~~ Fixed — `node_modules/.bin/` is now populated with symlinks (macOS/Linux) or `.cmd` wrappers (Windows) for all packages declaring `"bin"` in their `package.json`.
 - **No peer/optional dependency handling.** Peer deps are not resolved or validated.
 - **pnpm-lock.yaml not fully supported.** Declared in docs but the parser is incomplete — `package-lock.json` is the reliable path.
 
 ### Rust
 - **Cargo features and patches ignored.** Source replacement works for vanilla `Cargo.lock` deps, but `[features]` selections and `[patch]` overrides in `Cargo.toml` are not reflected.
 
+### Homebrew
+- **macOS only.** Brew bottle support currently targets macOS (arm64_sequoia, arm64_sonoma). Linux Homebrew (linuxbrew) is not yet supported.
+- **`ca-certificates` missing.** The `ca-certificates` formula has no ARM64 Sequoia bottle tag upstream — skipped during dependency resolution.
+- **No cask support.** Only formulas (command-line tools) are supported — GUI apps via `brew cask` are not handled.
+- **No version pinning.** KONG always fetches the latest stable bottle. Version-locked Brewfiles are not respected.
+
 ### General
 - **Sequential downloads.** All packages are fetched one at a time. Large projects (478 crates for gflow) take minutes.
 - **No retry on network failure.** A single timeout or connection drop fails the entire `kong rules` run.
 - **No proxy support.** Corporate networks behind HTTP proxies can't use KONG yet.
-- **Cross-drive = file copy.** When the project and store are on different drives, hard links can't cross the boundary — KONG silently falls back to file copy (slower, uses more disk).
 
 ---
 
@@ -265,9 +320,10 @@ src/
 ├── config.rs       # kong.rules schema + manifest parsers
 ├── download.rs     # HTTP download + SHA-256 verification
 ├── extract.rs      # zip / tar.gz / .crate extraction
-├── link.rs         # hard links, junctions, project-dir wiring
-├── runner.rs       # kong run <script>
+├── link.rs         # hard links, symlinks, project-dir wiring
+├── runner.rs       # kong run <script> — PATH/lib injection
 ├── store.rs        # store layout + doctor
+├── brew/           # Homebrew API client, GHCR bottle downloader, Mach-O fixup
 ├── python/         # PyPI client, venv builder, runtime
 ├── node/           # npm client, node_modules builder, runtime
 └── rust_eco/       # crates.io client, source replacement, toolchain

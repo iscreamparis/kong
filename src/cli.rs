@@ -23,6 +23,8 @@ pub enum Commands {
     Use(UseCmd),
     /// Run a named script in the kong-managed environment
     Run(RunCmd),
+    /// Clone + rules + use + run scripts — full end-to-end setup & smoke test
+    Super(SuperCmd),
     /// Manage the central store
     Store(StoreCmd),
     /// Run diagnostic checks
@@ -63,6 +65,10 @@ pub struct RunCmd {
     /// Path to project directory (defaults to current directory)
     #[arg(short, long)]
     pub path: Option<PathBuf>,
+
+    /// Skip automatic cargo build when target binary is missing
+    #[arg(long)]
+    pub no_build: bool,
 }
 
 #[derive(Parser)]
@@ -91,4 +97,21 @@ pub struct CloneCmd {
     /// Automatically run `kong rules` + `kong use` after clone
     #[arg(long)]
     pub setup: bool,
+}
+
+#[derive(Parser)]
+pub struct SuperCmd {
+    /// Repository URL to clone (e.g. https://github.com/owner/repo)
+    pub url: String,
+
+    /// Destination directory (defaults to the repository name)
+    pub directory: Option<PathBuf>,
+
+    /// Scripts to run after setup (defaults to all scripts in kong.rules)
+    #[arg(short, long)]
+    pub run: Vec<String>,
+
+    /// Skip automatic cargo build when target binary is missing
+    #[arg(long)]
+    pub no_build: bool,
 }

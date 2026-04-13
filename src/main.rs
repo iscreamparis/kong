@@ -1,3 +1,4 @@
+mod brew;
 mod cli;
 mod config;
 mod download;
@@ -100,6 +101,10 @@ fn main() -> Result<()> {
             if let Some(ref rs) = rules.rust {
                 rust_eco::source::configure_source_replacement(&env_dir, rs, &store::store_root()?, &rules)?;
             }
+            if let Some(ref brew) = rules.brew {
+                let store = store::store_root()?;
+                crate::brew::client::ensure_bottles_in_store(brew, &store)?;
+            }
             link::create_project_junctions(&dest, &env_dir, &rules)?;
             info!(path = %dest.display(), "Clone + setup complete. `cd {}` and you're ready.", dest.display());
         }
@@ -160,6 +165,12 @@ fn main() -> Result<()> {
                 info!("Rust source replacement configured");
             }
 
+            // ── Brew (system packages) ────────────────────────────────────
+            if let Some(ref brew) = rules.brew {
+                let store = store::store_root()?;
+                crate::brew::client::ensure_bottles_in_store(brew, &store)?;
+            }
+
             // ── Project-dir junctions → RULEZ ─────────────────────────────
             // Tools like Vite, Node, and Python resolve modules by walking up
             // the filesystem from the project dir — they never see RULEZ.
@@ -170,7 +181,124 @@ fn main() -> Result<()> {
         Commands::Run(cmd) => {
             let project_dir = cmd.path
                 .unwrap_or_else(|| std::env::current_dir().unwrap());
-            runner::run(&cmd.script, &cmd.args, &project_dir)?;
+            runner::run(&cmd.script, &cmd.args, &project_dir, cmd.no_build)?;
+        }
+        Commands::Super(cmd) => {
+            // ── 1. Clone ─────────────────────────────────────────────────
+            let dest = cmd.directory.unwrap_or_else(|| {
+                let repo_name = cmd.url
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("repo")
+                    .trim_end_matches(".git");
+                std::path::PathBuf::from(repo_name)
+            });
+
+            info!("════════════════════════════════════════════════════════");
+            info!("  KONG SUPER — {}", cmd.url);
+            info!("════════════════════════════════════════════════════════");
+
+            if dest.exists() {
+                info!(path = %dest.display(), "Directory exists, pulling latest");
+                let git = which_git();
+                let status = std::process::Command::new(&git)
+                    .args(["pull"])
+                    .current_dir(&dest)
+                    .status()
+                    .map_err(|e| anyhow::anyhow!("Failed to run git pull: {}", e))?;
+                if !status.success() {
+                    tracing::warn!("git pull failed — continuing with existing checkout");
+                }
+            } else {
+                info!(url = %cmd.url, dest = %dest.display(), "[1/4] Cloning repository");
+                let git = which_git();
+                let status = std::process::Command::new(&git)
+                    .args(["clone", &cmd.url])
+                    .arg(&dest)
+                    .status()
+                    .map_err(|e| anyhow::anyhow!("Failed to run git ({}): {}", git, e))?;
+                if !status.success() {
+                    anyhow::bail!("git clone failed with exit code {:?}", status.code());
+                }
+            }
+
+            // ── 2. Rules ─────────────────────────────────────────────────
+            info!("[2/4] Generating kong.rules");
+            let rules = config::generate_rules(&dest, false)?;
+            let rules_path = dest.join("kong.rules");
+            config::write_rules(&rules, &rules_path)?;
+            info!(path = %rules_path.display(), "kong.rules written");
+
+            // ── 3. Use ───────────────────────────────────────────────────
+            info!("[3/4] Setting up environments");
+            let project_name = dest
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "project".to_string());
+            let env_dir = store::rulez_dir(&project_name)?;
+
+            if let Some(ref py) = rules.python {
+                python::venv::build_venv(&env_dir, py, &store::store_root()?, &rules)?;
+                info!("  ✓ Python .venv");
+            }
+            if let Some(ref node_sec) = rules.node {
+                node::modules::build_node_modules(&env_dir, node_sec, &store::store_root()?)?;
+                info!("  ✓ Node node_modules");
+            }
+            if let Some(ref rs) = rules.rust {
+                rust_eco::source::configure_source_replacement(&env_dir, rs, &store::store_root()?, &rules)?;
+                info!("  ✓ Rust source replacement");
+            }
+            if let Some(ref brew) = rules.brew {
+                let store = store::store_root()?;
+                crate::brew::client::ensure_bottles_in_store(brew, &store)?;
+                info!("  ✓ Homebrew bottles ({})", brew.packages.len());
+            }
+            link::create_project_junctions(&dest, &env_dir, &rules)?;
+            info!("  ✓ Project junctions");
+
+            // ── 4. Run scripts ───────────────────────────────────────────
+            let scripts_to_run: Vec<String> = if !cmd.run.is_empty() {
+                cmd.run
+            } else {
+                // Run all scripts from kong.rules
+                rules.scripts.keys().cloned().collect()
+            };
+
+            if scripts_to_run.is_empty() {
+                info!("No scripts to run");
+            } else {
+                info!("[4/4] Running {} script(s)", scripts_to_run.len());
+                let mut passed = Vec::new();
+                let mut failed = Vec::new();
+
+                for script in &scripts_to_run {
+                    info!("──── kong run {} ────", script);
+                    match runner::run(script, &[], &dest, cmd.no_build) {
+                        Ok(()) => {
+                            info!("  ✓ {}", script);
+                            passed.push(script.as_str());
+                        }
+                        Err(e) => {
+                            tracing::warn!("  ✗ {} — {}", script, e);
+                            failed.push(script.as_str());
+                        }
+                    }
+                }
+
+                info!("════════════════════════════════════════════════════════");
+                info!("  RESULTS: {} passed, {} failed", passed.len(), failed.len());
+                for s in &passed {
+                    info!("    ✓ {}", s);
+                }
+                for s in &failed {
+                    info!("    ✗ {}", s);
+                }
+                info!("════════════════════════════════════════════════════════");
+            }
+
+            info!("SUPER complete → cd {}", dest.display());
         }
         Commands::Store(cmd) => match cmd.action {
             StoreAction::Path => {

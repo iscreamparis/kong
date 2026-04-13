@@ -93,6 +93,95 @@ pub fn extract_targz_strip1(archive_path: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Extract a .tar.gz, stripping the first N path components.
+/// Used for Homebrew bottles which have `<name>/<version>/bin/...` structure (strip 2).
+///
+/// Hard links are handled in a deferred second pass: during the first pass,
+/// hard-link entries whose targets haven't been extracted yet are recorded.
+/// After all regular files are extracted, the deferred hard links are retried.
+pub fn extract_targz_strip(archive_path: &Path, dest: &Path, strip: usize) -> Result<()> {
+    debug!(src = %archive_path.display(), dst = %dest.display(), strip, "Extracting tar.gz (strip-N)");
+
+    let file = std::fs::File::open(archive_path)
+        .with_context(|| format!("failed to open archive: {}", archive_path.display()))?;
+    let decompressed = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decompressed);
+
+    std::fs::create_dir_all(dest)?;
+
+    // Deferred hard links: (output_path, link_target_path)
+    let mut deferred_hardlinks: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let raw_path = entry.path()?.to_path_buf();
+        let stripped: std::path::PathBuf = raw_path.components().skip(strip).collect();
+        if stripped.as_os_str().is_empty() {
+            continue;
+        }
+        let out = dest.join(&stripped);
+        let etype = entry.header().entry_type();
+        if etype.is_dir() {
+            std::fs::create_dir_all(&out)?;
+        } else if etype.is_hard_link() {
+            // Hard links: strip the link target path the same way
+            if let Some(link_target) = entry.link_name()? {
+                let stripped_target: std::path::PathBuf =
+                    link_target.components().skip(strip).collect();
+                let target_out = dest.join(&stripped_target);
+                if target_out.exists() {
+                    if let Some(p) = out.parent() {
+                        std::fs::create_dir_all(p)?;
+                    }
+                    std::fs::hard_link(&target_out, &out)
+                        .or_else(|_| std::fs::copy(&target_out, &out).map(|_| ()))?;
+                } else {
+                    // Target not yet extracted — defer to second pass
+                    deferred_hardlinks.push((out, target_out));
+                }
+            }
+        } else if etype.is_symlink() {
+            // Symlinks: unpack normally (target is relative, no stripping needed)
+            if let Some(p) = out.parent() {
+                std::fs::create_dir_all(p)?;
+            }
+            entry.unpack(&out)?;
+        } else {
+            if let Some(p) = out.parent() {
+                std::fs::create_dir_all(p)?;
+            }
+            entry.unpack(&out)?;
+        }
+    }
+
+    // Second pass: retry deferred hard links now that all files are extracted
+    for (out, target_out) in deferred_hardlinks {
+        if let Some(p) = out.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        if target_out.exists() {
+            std::fs::hard_link(&target_out, &out)
+                .or_else(|_| std::fs::copy(&target_out, &out).map(|_| ()))
+                .with_context(|| {
+                    format!(
+                        "failed to create hard link {} → {}",
+                        out.display(),
+                        target_out.display()
+                    )
+                })?;
+        } else {
+            debug!(
+                link = %out.display(),
+                target = %target_out.display(),
+                "Skipping hard link: target not found after full extraction"
+            );
+        }
+    }
+
+    info!(dest = %dest.display(), "tar.gz extracted (strip-{})", strip);
+    Ok(())
+}
+
 /// Auto-detect archive type and extract.
 pub fn extract(archive_path: &Path, dest: &Path) -> Result<()> {
     let name = archive_path
