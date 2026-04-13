@@ -14,6 +14,9 @@ use tracing::{debug, info, warn};
 
 use crate::download::FileInfo;
 
+/// Buffer size for streaming bottle downloads (256 KiB).
+const DOWNLOAD_BUF_SIZE: usize = 256 * 1024;
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 /// Metadata for a resolved Homebrew formula.
@@ -130,7 +133,7 @@ pub fn download_bottle(formula: &FormulaInfo, dest: &Path) -> Result<FileInfo> {
         .with_context(|| format!("failed to create temp file: {}", archive_path.display()))?;
     let mut hasher = Sha256::new();
     let mut total_bytes: u64 = 0;
-    let mut buf = vec![0u8; 256 * 1024]; // 256 KiB buffer
+    let mut buf = vec![0u8; DOWNLOAD_BUF_SIZE];
 
     loop {
         let n = resp.read(&mut buf)

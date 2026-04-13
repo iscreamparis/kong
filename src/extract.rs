@@ -155,13 +155,13 @@ pub fn extract_targz_strip(archive_path: &Path, dest: &Path, strip: usize) -> Re
     }
 
     // Second pass: retry deferred hard links now that all files are extracted
-    for (out, target_out) in &deferred_hardlinks {
+    for (out, target_out) in deferred_hardlinks {
         if let Some(p) = out.parent() {
             std::fs::create_dir_all(p)?;
         }
         if target_out.exists() {
-            std::fs::hard_link(target_out, out)
-                .or_else(|_| std::fs::copy(target_out, out).map(|_| ()))
+            std::fs::hard_link(&target_out, &out)
+                .or_else(|_| std::fs::copy(&target_out, &out).map(|_| ()))
                 .with_context(|| {
                     format!(
                         "failed to create hard link {} → {}",
