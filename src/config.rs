@@ -25,6 +25,9 @@ pub struct KongRules {
     /// Named runnable scripts (merged from package.json + pyproject.toml scripts sections).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub scripts: HashMap<String, String>,
+    /// Services that can be started/stopped (inferred from brew packages like postgres, redis).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<ServiceEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,6 +46,25 @@ pub struct BrewEntry {
     pub store_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
+}
+
+/// A service that KONG can start/stop (e.g. postgres, redis).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceEntry {
+    /// Short name used in CLI: `kong service start postgres`
+    pub name: String,
+    /// The brew package that provides this service
+    pub brew_package: String,
+    /// Command to start the service (relative to the brew package bin dir)
+    pub start_cmd: String,
+    /// How to stop the service: command or "signal:SIGTERM"
+    pub stop_cmd: String,
+    /// Default port (for status display)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// Whether the service needs a data directory initialized before first start
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_cmd: Option<String>,
 }
 
 /// Pinned runtime versions managed by KONG (no system Python/Node/Rust needed).
@@ -389,6 +411,9 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
         None
     };
 
+    // ── Services (inferred from brew packages) ────────────────────────────────
+    let services = infer_services(brew_section.as_ref());
+
     Ok(KongRules {
         version: 1,
         project: project_name,
@@ -399,7 +424,61 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
         rust: rust_section,
         brew: brew_section,
         scripts,
+        services,
     })
+}
+
+// ── Service inference ────────────────────────────────────────────────────────
+
+/// Known brew packages that provide services.  Maps formula name → service recipe.
+fn infer_services(brew: Option<&BrewSection>) -> Vec<ServiceEntry> {
+    let brew = match brew {
+        Some(b) => b,
+        None => return Vec::new(),
+    };
+
+    let mut services = Vec::new();
+
+    for entry in &brew.packages {
+        // Normalise: "postgresql@17" → "postgresql"
+        let base_name = entry.name.split('@').next().unwrap_or(&entry.name);
+
+        match base_name {
+            "postgresql" => {
+                services.push(ServiceEntry {
+                    name: "postgres".to_string(),
+                    brew_package: entry.name.clone(),
+                    start_cmd: "pg_ctl start -D {data_dir} -l {log_file} -o \"-p {port}\"".to_string(),
+                    stop_cmd: "pg_ctl stop -D {data_dir}".to_string(),
+                    port: Some(5432),
+                    init_cmd: Some("initdb -D {data_dir} --no-locale -E UTF8".to_string()),
+                });
+            }
+            "redis" => {
+                services.push(ServiceEntry {
+                    name: "redis".to_string(),
+                    brew_package: entry.name.clone(),
+                    start_cmd: "redis-server --port {port} --daemonize yes --dir {data_dir} --pidfile {pid_file} --logfile {log_file}".to_string(),
+                    stop_cmd: "signal:SIGTERM".to_string(),
+                    port: Some(6379),
+                    init_cmd: None,
+                });
+            }
+            "memcached" => {
+                services.push(ServiceEntry {
+                    name: "memcached".to_string(),
+                    brew_package: entry.name.clone(),
+                    start_cmd: "memcached -d -p {port} -P {pid_file}".to_string(),
+                    stop_cmd: "signal:SIGTERM".to_string(),
+                    port: Some(11211),
+                    init_cmd: None,
+                });
+            }
+            _ => {} // not a known service
+        }
+    }
+
+    services
 }
 
 // ── Platform helpers ────────────────────────────────────────────────────────

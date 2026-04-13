@@ -53,6 +53,10 @@ indicatif = "0.17"
 # Temp directories for downloads
 tempfile = "3"
 
+# Process management (signals, pid checking)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Windows NTFS junctions
 [target.'cfg(windows)'.dependencies]
 junction = "1"

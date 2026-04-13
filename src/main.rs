@@ -8,13 +8,14 @@ mod node;
 mod python;
 mod runner;
 mod rust_eco;
+mod service;
 mod store;
 
 use anyhow::Result;
 use clap::Parser;
 use tracing::info;
 
-use cli::{Cli, Commands, StoreAction};
+use cli::{Cli, Commands, ServiceAction, StoreAction};
 
 fn which_git() -> String {
     // Check PATH first, then common Windows install locations.
@@ -299,6 +300,24 @@ fn main() -> Result<()> {
             }
 
             info!("SUPER complete → cd {}", dest.display());
+        }
+        Commands::Service(cmd) => {
+            let project_dir = cmd.path
+                .unwrap_or_else(|| std::env::current_dir().unwrap());
+            match cmd.action {
+                ServiceAction::Start { name, port } => {
+                    service::start(name.as_deref(), port, &project_dir)?;
+                }
+                ServiceAction::Stop { name } => {
+                    service::stop(name.as_deref(), &project_dir)?;
+                }
+                ServiceAction::Status => {
+                    service::status(&project_dir)?;
+                }
+                ServiceAction::Logs { name, lines } => {
+                    service::logs(&name, lines, &project_dir)?;
+                }
+            }
         }
         Commands::Store(cmd) => match cmd.action {
             StoreAction::Path => {

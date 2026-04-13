@@ -25,6 +25,8 @@ pub enum Commands {
     Run(RunCmd),
     /// Clone + rules + use + run scripts — full end-to-end setup & smoke test
     Super(SuperCmd),
+    /// Start, stop, and monitor background services (postgres, redis, etc.)
+    Service(ServiceCmd),
     /// Manage the central store
     Store(StoreCmd),
     /// Run diagnostic checks
@@ -114,4 +116,41 @@ pub struct SuperCmd {
     /// Skip automatic cargo build when target binary is missing
     #[arg(long)]
     pub no_build: bool,
+}
+
+#[derive(Parser)]
+pub struct ServiceCmd {
+    #[command(subcommand)]
+    pub action: ServiceAction,
+
+    /// Path to project directory (defaults to current directory)
+    #[arg(short, long, global = true)]
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+pub enum ServiceAction {
+    /// Start a service (or all services if no name given)
+    Start {
+        /// Service name (e.g. postgres, redis). Omit to start all.
+        name: Option<String>,
+        /// Override the default port
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Stop a service (or all services if no name given)
+    Stop {
+        /// Service name. Omit to stop all.
+        name: Option<String>,
+    },
+    /// Show status of services
+    Status,
+    /// Tail logs of a service
+    Logs {
+        /// Service name to show logs for
+        name: String,
+        /// Number of lines to show (default 50)
+        #[arg(short = 'n', long, default_value = "50")]
+        lines: usize,
+    },
 }

@@ -233,7 +233,6 @@ No pip. No npm. No brew. No conda. No rustup. Just KONG.
 - [x] **Mach-O fixup** — rewrites `@@HOMEBREW_PREFIX@@` placeholders in binaries + codesigns for macOS Sequoia
 - [x] **BFS transitive deps** — walks the full dependency tree so `psql`, `redis-server`, `jq` all get their shared libs
 - [x] **Runtime PATH/lib injection** — `kong run` injects brew `bin/` and `lib/` into the script environment automatically
-- [ ] **Service management** — start/stop services (postgres, redis) as part of `kong run`
 - [ ] **`ca-certificates` bottle** — ARM64 Sequoia bottle tag not yet available upstream
 
 ### v0.4 — End-to-end workflow ✅
@@ -241,23 +240,39 @@ No pip. No npm. No brew. No conda. No rustup. Just KONG.
 - [x] **Lazy cargo build** — `kong run` auto-builds Rust binaries when the target is missing
 - [ ] **`kong super` parallel script execution** — run independent scripts concurrently
 
-### v0.5 — Migration
+### v0.5 — Service management ← **current**
+- [ ] **`kong service start <name>`** — start a service (postgres, redis) as a background daemon with pid tracking
+- [ ] **`kong service stop <name>`** — stop a running service gracefully
+- [ ] **`kong service status`** — show running services, ports, pids, uptime
+- [ ] **`kong service logs <name>`** — tail stdout/stderr of a running service
+- [ ] **`kong.rules` services section** — declare services alongside scripts; `kong use` knows what can be started
+- [ ] **Auto-start on `kong run`** — scripts can declare service dependencies; KONG starts them before running the script
+
+### v0.6 — GUI (Slint)
+- [ ] **`kong gui`** — native desktop window using [Slint](https://slint.dev/) (Cupertino style on macOS, Fluent on Windows)
+- [ ] **Projects tab** — list all KONG-managed projects, run/stop scripts, view status
+- [ ] **Services tab** — start/stop/restart services, see ports, health, live logs
+- [ ] **Store tab** — browse global store by ecosystem, see disk usage, clean unused packages
+- [ ] **Packages tab** — per-project dependency view with ecosystem filters (Python / Node / Rust / Brew)
+- [ ] **Doctor tab** — system health checks, one-click auto-fix
+
+### v0.7 — Migration
 - [ ] **`kong import`** — convert an existing project (with local `.venv`, `node_modules`, `.cargo`) to the KONG way. Moves already-installed packages into the global store instead of re-downloading them, then replaces the local copies with links.
 - [ ] **`kong eject`** — convert a KONG-managed project back to standalone. Copies packages from the store into real local directories so the project works without KONG.
 
-### v0.6 — Performance
+### v0.8 — Performance
 - [ ] **Parallel downloads** — all packages fetched concurrently (currently sequential)
 - [ ] **Progress bars** — `indicatif` integration for long downloads
 - [ ] **Resume on failure** — partial downloads restart from where they stopped
 
-### v0.7 — Broader compatibility
+### v0.9 — Broader compatibility
 - [ ] **Python resolver** — resolve `>=` version constraints without a lockfile
 - [ ] **`kong shell`** — drop into an activated shell for a project
 - [ ] **`kong add <pkg>`** — add a package and update `kong.rules` in one step
 - [ ] **`kong store move <path>`** — move the global store to another disk
 - [ ] **`kong store add <path>`** — add a secondary store on another disk
 
-### v0.8 — Git integration (lite)
+### v0.10 — Git integration (lite)
 - [x] **`kong clone <url>`** — clone a repo, then `kong rules` + `kong use` separately (or `--setup` for all-in-one)
 - [ ] **`kong login`** — authenticate with GitHub/GitLab for private repos
 - [ ] Bundles a minimal `git` client (clone, fetch, pull) via the `gitoxide` / `gix` Rust crate — no system git required
