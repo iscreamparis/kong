@@ -180,24 +180,32 @@ fn main() -> Result<()> {
 
             // ── Brew (system packages) ────────────────────────────────────
             if let Some(ref brew) = rules.brew {
-                info!(count = brew.packages.len(), "Ensuring Homebrew bottles in store");
-                let store = store::store_root()?;
-                let mut downloaded = Vec::new();
-                for entry in &brew.packages {
-                    let bottle_dir = store.join(&entry.store_path);
-                    if !bottle_dir.exists() {
-                        info!(pkg = %entry.name, "Downloading missing bottle");
-                        let formula = crate::brew::client::resolve_formula(&entry.name)?;
-                        crate::brew::client::download_bottle(&formula, &bottle_dir)?;
-                        downloaded.push(entry.name.clone());
-                    } else {
-                        debug!(pkg = %entry.name, "Bottle already in store");
+                if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
+                    info!(count = brew.packages.len(), "Ensuring Homebrew bottles in store");
+                    let store = store::store_root()?;
+                    let mut downloaded = Vec::new();
+                    for entry in &brew.packages {
+                        let bottle_dir = store.join(&entry.store_path);
+                        if !bottle_dir.exists() {
+                            info!(pkg = %entry.name, "Downloading missing bottle");
+                            let formula = crate::brew::client::resolve_formula(&entry.name)?;
+                            crate::brew::client::download_bottle(&formula, &bottle_dir)?;
+                            downloaded.push(entry.name.clone());
+                        } else {
+                            debug!(pkg = %entry.name, "Bottle already in store");
+                        }
                     }
-                }
-                if downloaded.is_empty() {
-                    info!("All Homebrew bottles already in store");
+                    if downloaded.is_empty() {
+                        info!("All Homebrew bottles already in store");
+                    } else {
+                        info!(packages = ?downloaded, "Newly downloaded Homebrew bottles");
+                    }
                 } else {
-                    info!(packages = ?downloaded, "Newly downloaded Homebrew bottles");
+                    warn!(
+                        count = brew.packages.len(),
+                        os = std::env::consts::OS,
+                        "Skipping Homebrew bottles because brew handling is unsupported on this platform"
+                    );
                 }
             }
 
