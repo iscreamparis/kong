@@ -6,7 +6,9 @@
 //!
 //! The process inherits the current environment with these additions:
 //!   - PATH is prepended with brew package `bin/` dirs, Rust toolchain `bin/`,
-//!     `<env_dir>/node_modules/.bin`, and `<env_dir>/.venv/bin`
+//!     `<env_dir>/node_modules/.bin`, and the virtualenv executable dir:
+//!     `<env_dir>/.venv/bin` on Unix-like systems or `<env_dir>/.venv/Scripts`
+//!     on Windows
 //!   - `VIRTUAL_ENV` is set to `<env_dir>/.venv`
 //!   - `NODE_PATH` is set to `<env_dir>/node_modules`
 //!   - `DYLD_LIBRARY_PATH` / `LD_LIBRARY_PATH` includes brew `lib/` dirs
@@ -229,10 +231,12 @@ fn maybe_cargo_build(
         return Ok(());
     }
 
-    // Extract the binary path from the command
+    // Extract the binary path from the command, handling quoted paths.
+    // Strip surrounding quotes before joining with project_dir.
     let binary_path = cmd
         .split_whitespace()
         .find(|w| w.contains("target/") || w.contains("target\\"))
+        .map(|w| w.trim_matches(|c| c == '"' || c == '\''))
         .map(|w| project_dir.join(w));
 
     let binary_path = match binary_path {
@@ -242,11 +246,12 @@ fn maybe_cargo_build(
 
     info!(binary = %binary_path.display(), "Binary not found, running cargo build");
 
-    // Find kong-managed cargo
+    // Find kong-managed cargo (use platform-specific executable name)
+    let cargo_bin_name = if cfg!(windows) { "cargo.exe" } else { "cargo" };
     let cargo_exe = rules
         .and_then(|r| r.runtimes.as_ref())
         .and_then(|rt| rt.rust.as_ref())
-        .map(|rust| store_root.join(&rust.store_path).join("bin").join("cargo"))
+        .map(|rust| store_root.join(&rust.store_path).join("bin").join(cargo_bin_name))
         .filter(|p| p.exists());
 
     let cargo = match cargo_exe {
@@ -267,12 +272,15 @@ fn maybe_cargo_build(
         "LD_LIBRARY_PATH"
     };
 
+    let pkg_config_path = build_pkg_config_path(store_root, rules);
+
     let status = std::process::Command::new(&cargo)
         .arg("build")
         .args(&profile_flag)
         .current_dir(project_dir)
         .env("PATH", path)
         .env(lib_env_key, lib_path)
+        .env("PKG_CONFIG_PATH", pkg_config_path)
         .status()
         .with_context(|| format!("failed to run '{cargo} build'"))?;
 

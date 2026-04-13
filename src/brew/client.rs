@@ -93,7 +93,13 @@ pub fn resolve_formula(name: &str) -> Result<FormulaInfo> {
 
 /// Download a bottle to the kong store.
 /// Returns the hash of the downloaded file.
+///
+/// Streams the response to a temp file while incrementally computing SHA-256,
+/// avoiding loading the entire bottle into memory.
 pub fn download_bottle(formula: &FormulaInfo, dest: &Path) -> Result<FileInfo> {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Write};
+
     info!(
         formula = %formula.name, version = %formula.version,
         dest = %dest.display(), "Downloading Homebrew bottle"
@@ -103,7 +109,7 @@ pub fn download_bottle(formula: &FormulaInfo, dest: &Path) -> Result<FileInfo> {
     let token = ghcr_token(&formula.name)?;
 
     let client = http_client()?;
-    let resp = client
+    let mut resp = client
         .get(&formula.bottle_url)
         .header("Authorization", format!("Bearer {token}"))
         .send()
@@ -117,14 +123,27 @@ pub fn download_bottle(formula: &FormulaInfo, dest: &Path) -> Result<FileInfo> {
         );
     }
 
-    let bytes = resp
-        .bytes()
-        .with_context(|| format!("failed to read bottle bytes for '{}'", formula.name))?;
-
-    // Verify SHA-256
-    use sha2::{Digest, Sha256};
+    // Stream to temp file while incrementally computing SHA-256
+    let tmp = tempfile::TempDir::new()?;
+    let archive_path = tmp.path().join(format!("{}.tar.gz", formula.name));
+    let mut file = std::fs::File::create(&archive_path)
+        .with_context(|| format!("failed to create temp file: {}", archive_path.display()))?;
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
+    let mut total_bytes: u64 = 0;
+    let mut buf = vec![0u8; 256 * 1024]; // 256 KiB buffer
+
+    loop {
+        let n = resp.read(&mut buf)
+            .with_context(|| format!("failed to read bottle bytes for '{}'", formula.name))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        file.write_all(&buf[..n])?;
+        total_bytes += n as u64;
+    }
+    drop(file);
+
     let hash = hex::encode(hasher.finalize());
 
     if hash != formula.bottle_sha256 {
@@ -137,13 +156,8 @@ pub fn download_bottle(formula: &FormulaInfo, dest: &Path) -> Result<FileInfo> {
     }
     debug!(formula = %formula.name, "Bottle hash verified");
 
-    // Write to temp file, then extract
-    let tmp = tempfile::TempDir::new()?;
-    let archive_path = tmp.path().join(format!("{}.tar.gz", formula.name));
-    std::fs::write(&archive_path, &bytes)?;
-
     info!(
-        formula = %formula.name, size = bytes.len(),
+        formula = %formula.name, size = total_bytes,
         "Bottle downloaded, extracting"
     );
 
@@ -566,6 +580,62 @@ fn find_store_version(store_root: &Path, name: &str) -> Option<String> {
         }
     }
     None
+}
+
+// ── Shared bottle-ensure logic ───────────────────────────────────────────────
+
+/// Ensure all bottles from a `BrewSection` are present in the kong store.
+///
+/// On unsupported platforms (not macOS/Linux) this logs a warning and skips.
+/// On macOS, runs `fixup_macho_placeholders()` after downloading so freshly
+/// downloaded bottles are immediately usable.
+pub fn ensure_bottles_in_store(
+    brew: &crate::config::BrewSection,
+    store: &std::path::Path,
+) -> Result<()> {
+    if !cfg!(target_os = "macos") && !cfg!(target_os = "linux") {
+        warn!(
+            count = brew.packages.len(),
+            os = std::env::consts::OS,
+            "Skipping Homebrew bottles: only supported on macOS/Linux"
+        );
+        return Ok(());
+    }
+
+    info!(count = brew.packages.len(), "Ensuring Homebrew bottles in store");
+    let mut downloaded = Vec::new();
+
+    for entry in &brew.packages {
+        let bottle_dir = store.join(&entry.store_path);
+        if !bottle_dir.exists() {
+            info!(pkg = %entry.name, "Downloading missing bottle");
+            let formula = resolve_formula(&entry.name)?;
+            download_bottle(&formula, &bottle_dir)?;
+            downloaded.push(entry.name.clone());
+        } else {
+            debug!(pkg = %entry.name, "Bottle already in store");
+        }
+    }
+
+    if downloaded.is_empty() {
+        info!("All Homebrew bottles already in store");
+    } else {
+        info!(packages = ?downloaded, "Newly downloaded Homebrew bottles");
+    }
+
+    // On macOS, fix Mach-O placeholders for all bottles so cross-dep
+    // references resolve correctly.
+    #[cfg(target_os = "macos")]
+    {
+        for entry in &brew.packages {
+            let bottle_dir = store.join(&entry.store_path);
+            if bottle_dir.exists() {
+                fixup_macho_placeholders(&bottle_dir, store)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

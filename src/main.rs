@@ -12,7 +12,7 @@ mod store;
 
 use anyhow::Result;
 use clap::Parser;
-use tracing::{debug, info};
+use tracing::info;
 
 use cli::{Cli, Commands, StoreAction};
 
@@ -102,21 +102,8 @@ fn main() -> Result<()> {
                 rust_eco::source::configure_source_replacement(&env_dir, rs, &store::store_root()?, &rules)?;
             }
             if let Some(ref brew) = rules.brew {
-                if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
-                    let store = store::store_root()?;
-                    for entry in &brew.packages {
-                        let bottle_dir = store.join(&entry.store_path);
-                        if !bottle_dir.exists() {
-                            info!(pkg = %entry.name, "Re-downloading missing bottle");
-                            let formula = crate::brew::client::resolve_formula(&entry.name)?;
-                            crate::brew::client::download_bottle(&formula, &bottle_dir)?;
-                        }
-                    }
-                } else {
-                    tracing::warn!(
-                        "Skipping brew setup during `kong clone --setup`: Homebrew bottles are only supported on macOS/Linux"
-                    );
-                }
+                let store = store::store_root()?;
+                crate::brew::client::ensure_bottles_in_store(brew, &store)?;
             }
             link::create_project_junctions(&dest, &env_dir, &rules)?;
             info!(path = %dest.display(), "Clone + setup complete. `cd {}` and you're ready.", dest.display());
@@ -180,33 +167,8 @@ fn main() -> Result<()> {
 
             // ── Brew (system packages) ────────────────────────────────────
             if let Some(ref brew) = rules.brew {
-                if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
-                    info!(count = brew.packages.len(), "Ensuring Homebrew bottles in store");
-                    let store = store::store_root()?;
-                    let mut downloaded = Vec::new();
-                    for entry in &brew.packages {
-                        let bottle_dir = store.join(&entry.store_path);
-                        if !bottle_dir.exists() {
-                            info!(pkg = %entry.name, "Downloading missing bottle");
-                            let formula = crate::brew::client::resolve_formula(&entry.name)?;
-                            crate::brew::client::download_bottle(&formula, &bottle_dir)?;
-                            downloaded.push(entry.name.clone());
-                        } else {
-                            debug!(pkg = %entry.name, "Bottle already in store");
-                        }
-                    }
-                    if downloaded.is_empty() {
-                        info!("All Homebrew bottles already in store");
-                    } else {
-                        info!(packages = ?downloaded, "Newly downloaded Homebrew bottles");
-                    }
-                } else {
-                    warn!(
-                        count = brew.packages.len(),
-                        os = std::env::consts::OS,
-                        "Skipping Homebrew bottles because brew handling is unsupported on this platform"
-                    );
-                }
+                let store = store::store_root()?;
+                crate::brew::client::ensure_bottles_in_store(brew, &store)?;
             }
 
             // ── Project-dir junctions → RULEZ ─────────────────────────────
@@ -290,13 +252,7 @@ fn main() -> Result<()> {
             }
             if let Some(ref brew) = rules.brew {
                 let store = store::store_root()?;
-                for entry in &brew.packages {
-                    let bottle_dir = store.join(&entry.store_path);
-                    if !bottle_dir.exists() {
-                        let formula = crate::brew::client::resolve_formula(&entry.name)?;
-                        crate::brew::client::download_bottle(&formula, &bottle_dir)?;
-                    }
-                }
+                crate::brew::client::ensure_bottles_in_store(brew, &store)?;
                 info!("  ✓ Homebrew bottles ({})", brew.packages.len());
             }
             link::create_project_junctions(&dest, &env_dir, &rules)?;
