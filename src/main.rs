@@ -102,14 +102,20 @@ fn main() -> Result<()> {
                 rust_eco::source::configure_source_replacement(&env_dir, rs, &store::store_root()?, &rules)?;
             }
             if let Some(ref brew) = rules.brew {
-                let store = store::store_root()?;
-                for entry in &brew.packages {
-                    let bottle_dir = store.join(&entry.store_path);
-                    if !bottle_dir.exists() {
-                        info!(pkg = %entry.name, "Re-downloading missing bottle");
-                        let formula = crate::brew::client::resolve_formula(&entry.name)?;
-                        crate::brew::client::download_bottle(&formula, &bottle_dir)?;
+                if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
+                    let store = store::store_root()?;
+                    for entry in &brew.packages {
+                        let bottle_dir = store.join(&entry.store_path);
+                        if !bottle_dir.exists() {
+                            info!(pkg = %entry.name, "Re-downloading missing bottle");
+                            let formula = crate::brew::client::resolve_formula(&entry.name)?;
+                            crate::brew::client::download_bottle(&formula, &bottle_dir)?;
+                        }
                     }
+                } else {
+                    tracing::warn!(
+                        "Skipping brew setup during `kong clone --setup`: Homebrew bottles are only supported on macOS/Linux"
+                    );
                 }
             }
             link::create_project_junctions(&dest, &env_dir, &rules)?;
