@@ -279,7 +279,15 @@ No pip. No npm. No brew. No conda. No rustup. Just KONG.
 - [ ] **`kong store move <path>`** — move the global store to another disk
 - [ ] **`kong store add <path>`** — add a secondary store on another disk
 
-### v0.10 — Git integration (lite)
+### v0.10 — Unified system package registry
+- [ ] **Cross-platform package resolution** — single `[tools]` / `[services]` section in `kong.rules` resolves to the best source per OS: Homebrew bottles (macOS), Scoop portable apps (Windows), winget (Windows fallback), Chocolatey (Windows last resort)
+- [ ] **Scoop bucket parser** — read Scoop JSON manifests (url, hash, bin) for portable Windows packages
+- [ ] **winget manifest parser** — read winget YAML manifests from `microsoft/winget-pkgs` for Windows installers
+- [ ] **Aggregation server** — lightweight API that indexes Homebrew, Scoop, winget, and Chocolatey into a unified `GET /resolve?name=postgresql&os=windows` endpoint with download URL, SHA-256, and bin path
+- [ ] **Offline fallback** — Kong can resolve locally from cached registry snapshots when the server is unreachable
+- [ ] **Source priority** — Scoop (portable) > winget (official) > Chocolatey (community); Homebrew for macOS/Linux
+
+### v0.11 — Git integration (lite)
 - [x] **`kong clone <url>`** — clone a repo, then `kong rules` + `kong use` separately (or `--setup` for all-in-one)
 - [ ] **`kong login`** — authenticate with GitHub/GitLab for private repos
 - [ ] Bundles a minimal `git` client (clone, fetch, pull) via the `gitoxide` / `gix` Rust crate — no system git required
