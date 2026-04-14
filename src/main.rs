@@ -39,7 +39,65 @@ fn which_git() -> String {
     "git".to_string() // let it fail with a legible OS error
 }
 
+/// On macOS, if running from inside a .app bundle for the first time,
+/// silently symlink this binary into /usr/local/bin or ~/.local/bin.
+#[cfg(target_os = "macos")]
+fn maybe_install_cli() {
+    use std::path::PathBuf;
+
+    // Only act when launched from inside a .app bundle
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let exe_str = exe.to_string_lossy();
+    if !exe_str.contains(".app/Contents/MacOS/") {
+        return;
+    }
+
+    // Marker file — only install once
+    let marker = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config"))
+        .join("kong")
+        .join(".cli_installed");
+    if marker.exists() {
+        return;
+    }
+
+    let _ = std::fs::create_dir_all(marker.parent().unwrap());
+
+    // Try /usr/local/bin, fall back to ~/.local/bin
+    let system_link = std::path::Path::new("/usr/local/bin/kong");
+    let installed = if system_link.parent().map(|p| p.exists()).unwrap_or(false)
+        && std::fs::metadata("/usr/local/bin")
+            .map(|m| {
+                use std::os::unix::fs::MetadataExt;
+                // writable by current user if owned by us, or world-writable
+                m.uid() == unsafe { libc::getuid() } || m.mode() & 0o002 != 0
+            })
+            .unwrap_or(false)
+    {
+        let _ = std::fs::remove_file(system_link);
+        std::os::unix::fs::symlink(&exe, system_link).is_ok()
+    } else {
+        let local_bin = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join(".local/bin");
+        let _ = std::fs::create_dir_all(&local_bin);
+        let link = local_bin.join("kong");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&exe, &link).is_ok()
+    };
+
+    if installed {
+        let _ = std::fs::write(&marker, "");
+    }
+}
+
 fn main() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    maybe_install_cli();
+
     let cli = Cli::parse();
 
     let filter = if cli.verbose { "kong=trace" } else { "kong=info" };

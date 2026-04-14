@@ -73,6 +73,12 @@ export component KongWindow inherits Window {
     callback delete-project(string);             // (project-name)
     callback select-project(string);             // (project-name) — for packages tab
     callback run-doctor();
+    callback clone-go(string, string, bool, bool, bool);  // (url, dest, do-rules, do-use, do-run)
+    callback clone-preview(string, string);                // (url, dest) — preview missing packages
+
+    // ── Clone popup state ───────────────────────────────────────────────
+    in-out property <bool> clone-popup-visible: false;
+    in-out property <[LogLine]> clone-log-lines: [];
 
     VerticalBox {
         padding: 0px;
@@ -102,6 +108,14 @@ export component KongWindow inherits Window {
             }
 
             Rectangle { width: 12px; }
+
+            Button {
+                text: "Clone";
+                min-height: 28px;
+                clicked => { root.clone-popup-visible = true; }
+            }
+
+            Rectangle { width: 6px; }
 
             Button {
                 text: "Refresh";
@@ -603,6 +617,163 @@ export component KongWindow inherits Window {
                                 font-size: 12px;
                                 font-family: "Menlo, Monaco, monospace";
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    // CLONE POPUP OVERLAY
+    // ═════════════════════════════════════════════════════════════════════
+    if root.clone-popup-visible : Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #00000088;
+
+        // Click backdrop to close
+        TouchArea {
+            clicked => { root.clone-popup-visible = false; }
+        }
+
+        // Dialog card
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 560px;
+            height: 560px;
+            border-radius: 12px;
+            background: white;
+            clip: true;
+
+            // Block clicks from reaching backdrop
+            TouchArea {}
+
+            VerticalBox {
+                padding: 24px;
+                spacing: 12px;
+
+                Text {
+                    text: "Clone Repository";
+                    font-size: 18px;
+                    font-weight: 700;
+                }
+
+                Rectangle { height: 4px; }
+
+                // ── URL ──────────────────────────────────────────
+                Text {
+                    text: "Repository URL";
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+                clone-url-input := LineEdit {
+                    placeholder-text: "https://github.com/owner/repo";
+                    min-height: 36px;
+                }
+
+                Rectangle { height: 4px; }
+
+                // ── Destination ──────────────────────────────────
+                Text {
+                    text: "Destination folder (leave empty for repo name)";
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+                clone-dest-input := LineEdit {
+                    placeholder-text: "e.g. ~/Projects/my-app";
+                    min-height: 36px;
+                }
+
+                Rectangle { height: 8px; }
+
+                // ── Options ─────────────────────────────────────
+                Text {
+                    text: "After cloning:";
+                    font-size: 12px;
+                    font-weight: 600;
+                }
+
+                clone-do-rules := CheckBox {
+                    text: "Generate kong.rules (download all dependencies)";
+                    checked: true;
+                }
+                clone-do-use := CheckBox {
+                    text: "Install environments (kong use)";
+                    checked: true;
+                }
+                clone-do-run := CheckBox {
+                    text: "Run all scripts (smoke test)";
+                    checked: false;
+                }
+
+                // ── Log area (fills remaining space) ────────────
+                Rectangle {
+                    vertical-stretch: 1;
+                    min-height: 60px;
+                    border-width: 1px;
+                    border-color: #e0e0e0;
+                    border-radius: 6px;
+                    clip: true;
+
+                    ScrollView {
+                        VerticalBox {
+                            padding: 6px;
+                            spacing: 1px;
+                            alignment: start;
+                            if root.clone-log-lines.length == 0 : Text {
+                                text: "Click Preview to scan dependencies, or GO to start.";
+                                font-size: 11px;
+                                opacity: 0.4;
+                            }
+                            for line in root.clone-log-lines : Text {
+                                text: line.text;
+                                font-size: 10px;
+                                font-family: "Menlo, Monaco, monospace";
+                                wrap: no-wrap;
+                            }
+                        }
+                    }
+                }
+
+                // ── Buttons ─────────────────────────────────────
+                HorizontalBox {
+                    spacing: 8px;
+                    Rectangle { horizontal-stretch: 1; }
+
+                    Button {
+                        text: "Cancel";
+                        min-height: 34px;
+                        clicked => {
+                            root.clone-popup-visible = false;
+                            root.clone-log-lines = [];
+                        }
+                    }
+
+                    Button {
+                        text: "Preview";
+                        min-height: 34px;
+                        clicked => {
+                            root.clone-preview(
+                                clone-url-input.text,
+                                clone-dest-input.text
+                            );
+                        }
+                    }
+
+                    Button {
+                        text: "GO";
+                        min-height: 34px;
+                        min-width: 80px;
+                        clicked => {
+                            root.clone-go(
+                                clone-url-input.text,
+                                clone-dest-input.text,
+                                clone-do-rules.checked,
+                                clone-do-use.checked,
+                                clone-do-run.checked
+                            );
                         }
                     }
                 }

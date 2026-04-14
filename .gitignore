@@ -2,6 +2,9 @@
 /target/
 Cargo.lock
 build/
+
+# Release output
+/dist/
 # OS
 .DS_Store
 Thumbs.db
