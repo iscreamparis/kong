@@ -1,6 +1,6 @@
 [package]
 name = "kong"
-version = "0.0.1-alpha"
+version = "0.7.0"
 edition = "2021"
 description = "Unified dependency manager for Python, Node.js, and Rust"
 license = "MIT OR Apache-2.0"

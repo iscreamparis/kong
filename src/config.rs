@@ -155,6 +155,12 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
 
         // BFS queue — seed with direct deps, then expand transitives
         use std::collections::VecDeque;
+        // Build a name→version map from user's explicit pins so transitive
+        // resolution skips PyPI when the version is already declared.
+        let pinned: HashMap<String, String> = python_deps
+            .iter()
+            .map(|d| (crate::python::parser::normalize_python_name(&d.name), d.version.clone()))
+            .collect();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut queue: VecDeque<crate::python::parser::PythonDep> = python_deps.into_iter().collect();
 
@@ -207,11 +213,20 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
                 }) {
                     continue;
                 }
-                // version is empty when no == pin found — resolve latest from PyPI
+                // version is empty when no exact pin found (range/wildcard specifiers).
+                // Resolution order:
+                //   1. User's explicit pin from requirements.txt / lockfile
+                //   2. Latest compatible version from PyPI JSON API
                 let version = if t.version.is_empty() {
-                    match crate::python::client::resolve_latest_version(&t.name) {
-                        Ok(v) => v,
-                        Err(e) => { tracing::warn!(pkg = %t.name, "Could not resolve version: {e}"); continue; }
+                    let norm = crate::python::parser::normalize_python_name(&t.name);
+                    if let Some(pinned_ver) = pinned.get(&norm) {
+                        debug!(pkg = %t.name, ver = %pinned_ver, "Using user-pinned version for transitive dep");
+                        pinned_ver.clone()
+                    } else {
+                        match crate::python::client::resolve_latest_version(&t.name) {
+                            Ok(v) => v,
+                            Err(e) => { tracing::warn!(pkg = %t.name, "Could not resolve version: {e}"); continue; }
+                        }
                     }
                 } else {
                     t.version

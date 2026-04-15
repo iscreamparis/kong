@@ -150,16 +150,17 @@ fn parse_requires_dist(entries: &[String]) -> Vec<TransitiveDep> {
 }
 
 /// Extract a concrete version from a specifier like "==3.1.0" → "3.1.0".
-/// Only returns exact pins (==). For >= / ~= / etc. returns None so the
-/// caller can resolve the latest satisfying version via the PyPI API instead
-/// of using a truncated version string like "3.1" that doesn't exist on PyPI.
+/// Only returns exact, non-wildcard pins (==). For >= / ~= / ==X.* / etc.
+/// returns None so the caller resolves via PyPI or the user's pinned list.
 fn extract_min_version(spec: &str) -> Option<String> {
-    // Only return exact pins — avoid returning "3.1" for ">=3.1" which breaks
-    // PyPI lookups (the actual release would be "3.1.0", "3.1.3", etc.)
     for part in spec.split(',') {
         let part = part.trim();
         if let Some(v) = part.strip_prefix("==") {
-            return Some(v.trim().to_string());
+            let v = v.trim();
+            // Reject wildcard equality like "==1.*" — not a real release on PyPI.
+            if !v.contains('*') {
+                return Some(v.to_string());
+            }
         }
     }
     None
