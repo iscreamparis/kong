@@ -543,8 +543,22 @@ fn resolve_placeholder(path: &str, store_root: &Path) -> Option<String> {
         let rest = &path["@@HOMEBREW_CELLAR@@/".len()..];
         let mut parts = rest.splitn(3, '/');
         let name = parts.next()?;
-        let version = parts.next()?;
+        let version_in_placeholder = parts.next()?;
         let remainder = parts.next().unwrap_or("");
+
+        // Try the version from the placeholder first
+        let store_path_with_placeholder_version = store_root.join(format!("{name}-{version_in_placeholder}"));
+        if store_path_with_placeholder_version.exists() {
+            let store_path = store_path_with_placeholder_version;
+            if remainder.is_empty() {
+                return Some(store_path.to_string_lossy().into_owned());
+            } else {
+                return Some(store_path.join(remainder).to_string_lossy().into_owned());
+            }
+        }
+
+        // If not found, fall back to finding the version in the store
+        let version = find_store_version(store_root, name)?;
         let store_path = store_root.join(format!("{name}-{version}"));
         if remainder.is_empty() {
             Some(store_path.to_string_lossy().into_owned())
@@ -630,10 +644,11 @@ pub fn ensure_bottles_in_store(
     // references resolve correctly.
     #[cfg(target_os = "macos")]
     {
+        let brew_store = store.join("brew");
         for entry in &brew.packages {
             let bottle_dir = store.join(&entry.store_path);
             if bottle_dir.exists() {
-                fixup_macho_placeholders(&bottle_dir, store)?;
+                fixup_macho_placeholders(&bottle_dir, &brew_store)?;
             }
         }
     }
