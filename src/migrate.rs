@@ -700,8 +700,12 @@ fn kong_python_exe(store_root: &Path, rules: &KongRules) -> Option<PathBuf> {
     let base = store_root.join(&rt.store_path);
     #[cfg(windows)]
     {
-        let exe = base.join("python").join("python.exe");
+        // Try flat layout first (python.exe directly in runtime dir)
+        let exe = base.join("python.exe");
         if exe.exists() { return Some(exe); }
+        // Fallback: nested python/ subdirectory
+        let exe2 = base.join("python").join("python.exe");
+        if exe2.exists() { return Some(exe2); }
     }
     #[cfg(not(windows))]
     {

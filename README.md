@@ -29,17 +29,23 @@ pnpm proved this model works for Node.js. KONG extends it to all three ecosystem
 
 ### Windows
 
-Download the installer from the [Releases page](https://github.com/iscreamparis/kong/releases) and run it. It drops `kong.exe` into `C:\kong\`, creates the store directory, and adds it to your system PATH.
+Download **[Kong-0.7.0-windows-x64-setup.exe](https://github.com/iscreamparis/kong/releases/download/v0.7.0/Kong-0.7.0-windows-x64-setup.exe)** from the [Releases page](https://github.com/iscreamparis/kong/releases) and run it. It drops `kong.exe` into `C:\kong\`, creates the store directory, and adds it to your system PATH.
 
 ### macOS
 
+Download **[Kong-0.7.0-macos-arm64.dmg](https://github.com/iscreamparis/kong/releases/download/v0.7.0/Kong-0.7.0-macos-arm64.dmg)** from the [Releases page](https://github.com/iscreamparis/kong/releases). Drag `Kong.app` to Applications, then right-click → Open to bypass Gatekeeper on first launch.
+
+<details>
+<summary>Build from source</summary>
+
 ```bash
-# Build from source (requires Rust toolchain)
 git clone https://github.com/iscreamparis/kong
 cd kong
 cargo build --release
 cp target/release/kong ~/.local/bin/
 ```
+
+</details>
 
 The store lives at `~/Library/Application Support/kong/`. On macOS, KONG uses symlinks instead of NTFS junctions.
 
