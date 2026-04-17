@@ -3,6 +3,7 @@
 //! Populates the UI with data from the store, RULEZ, and kong.rules files,
 //! then hands off to the Slint event loop.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -63,6 +64,20 @@ fn build_dep_index(projects: &[(String, PathBuf)]) -> DepIndex {
 
 /// Launch the GUI.
 pub fn launch(project_dir: Option<&Path>) -> Result<()> {
+    // ── Single-instance guard (flock, auto-released on crash/exit) ───────
+    #[cfg(unix)]
+    let _lock = {
+        let lock_path = crate::store::install_root()?.join(".gui.lock");
+        let lock_file = File::create(&lock_path)?;
+        use std::os::unix::io::AsRawFd;
+        let rc = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc != 0 {
+            eprintln!("Kong GUI is already running.");
+            return Ok(());
+        }
+        lock_file // kept alive → lock held until process exits
+    };
+
     let window = KongWindow::new()?;
 
     // ── Populate initial data ────────────────────────────────────────────
@@ -226,6 +241,65 @@ pub fn launch(project_dir: Option<&Path>) -> Result<()> {
                 win.set_status_message(SharedString::from(
                     format!("✓ Deleted environment for {}", project_name)
                 ));
+                populate_all(&win, pd.as_deref());
+            }
+        });
+    }
+
+    {
+        let w = window.as_weak();
+        let pd = project_dir.map(|p| p.to_path_buf());
+        window.on_import_project(move |project_path| {
+            if let Some(win) = w.upgrade() {
+                let proj_dir = std::path::PathBuf::from(project_path.as_str());
+                match crate::migrate::import_project(&proj_dir) {
+                    Ok(()) => {
+                        win.set_status_message(SharedString::from("✓ Import complete"));
+                    }
+                    Err(e) => {
+                        win.set_status_message(SharedString::from(format!("✗ Import failed: {e}")));
+                    }
+                }
+                populate_all(&win, pd.as_deref());
+            }
+        });
+    }
+
+    {
+        let w = window.as_weak();
+        let pd = project_dir.map(|p| p.to_path_buf());
+        window.on_solidify_project(move |project_path| {
+            if let Some(win) = w.upgrade() {
+                let proj_dir = std::path::PathBuf::from(project_path.as_str());
+                match crate::migrate::solidify_project(&proj_dir) {
+                    Ok(()) => {
+                        win.set_status_message(SharedString::from("✓ Solidify complete — project is standalone"));
+                    }
+                    Err(e) => {
+                        win.set_status_message(SharedString::from(format!("✗ Solidify failed: {e}")));
+                    }
+                }
+                populate_all(&win, pd.as_deref());
+            }
+        });
+    }
+
+    {
+        let w = window.as_weak();
+        let pd = project_dir.map(|p| p.to_path_buf());
+        window.on_eject_project(move |project_name| {
+            if let Some(win) = w.upgrade() {
+                let proj_dir = resolve_project_dir(&project_name);
+                match crate::migrate::eject_project(&proj_dir) {
+                    Ok(()) => {
+                        win.set_status_message(SharedString::from(
+                            format!("✓ Ejected {} from KONG", project_name)
+                        ));
+                    }
+                    Err(e) => {
+                        win.set_status_message(SharedString::from(format!("✗ Eject failed: {e}")));
+                    }
+                }
                 populate_all(&win, pd.as_deref());
             }
         });
@@ -531,39 +605,12 @@ fn populate_packages(window: &KongWindow, project_name: &str) {
 /// Discover all KONG-managed projects by scanning the RULEZ directory
 /// and looking for projects that have a kong.rules file.
 fn discover_projects() -> Vec<(String, PathBuf)> {
-    let mut projects = Vec::new();
+    let mut projects: Vec<(String, PathBuf)> = store::read_registry()
+        .into_iter()
+        .filter(|(_, path)| path.join("kong.rules").exists())
+        .collect();
 
-    // Method 1: Scan RULEZ directory for project names, then find their source dirs
-    let rulez = match store::install_root() {
-        Ok(root) => root.join("RULEZ"),
-        Err(_) => return projects,
-    };
-
-    if !rulez.exists() {
-        return projects;
-    }
-
-    if let Ok(entries) = std::fs::read_dir(&rulez) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            // Try to find the project source directory
-            // Check common locations
-            for parent in &[
-                dirs::home_dir().unwrap_or_default().join("Documents/GitHub"),
-                dirs::home_dir().unwrap_or_default().join("Projects"),
-                dirs::home_dir().unwrap_or_default().join("Developer"),
-                std::env::current_dir().unwrap_or_default(),
-            ] {
-                let candidate = parent.join(&name);
-                if candidate.join("kong.rules").exists() {
-                    projects.push((name.clone(), candidate));
-                    break;
-                }
-            }
-        }
-    }
-
-    // Method 2: Current directory if it has kong.rules
+    // Also include cwd if it has kong.rules and isn't already listed
     if let Ok(cwd) = std::env::current_dir() {
         if cwd.join("kong.rules").exists() {
             let name = cwd.file_name().unwrap_or_default().to_string_lossy().to_string();

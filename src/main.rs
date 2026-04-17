@@ -5,6 +5,7 @@ mod download;
 mod extract;
 mod gui;
 mod link;
+mod migrate;
 mod node;
 mod python;
 mod runner;
@@ -106,7 +107,17 @@ fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    match cli.command {
+    // No subcommand → launch GUI (e.g. double-click from Finder)
+    let command = match cli.command {
+        Some(cmd) => cmd,
+        None => {
+            let project_dir = std::env::current_dir().unwrap_or_default();
+            gui::launch(Some(&project_dir))?;
+            return Ok(());
+        }
+    };
+
+    match command {
         Commands::Clone(cmd) => {
             // Derive destination directory from the URL if not given.
             let dest = cmd.directory.unwrap_or_else(|| {
@@ -166,6 +177,7 @@ fn main() -> Result<()> {
                 crate::brew::client::ensure_bottles_in_store(brew, &store)?;
             }
             link::create_project_junctions(&dest, &env_dir, &rules)?;
+            store::register_project(&project_name, &dest);
             info!(path = %dest.display(), "Clone + setup complete. `cd {}` and you're ready.", dest.display());
         }
         Commands::Rules(cmd) => {
@@ -236,6 +248,7 @@ fn main() -> Result<()> {
             // the filesystem from the project dir — they never see RULEZ.
             // Create junctions so resolution just works without env hacks.
             link::create_project_junctions(project_dir, &env_dir, &rules)?;
+            store::register_project(&project_name, project_dir);
             info!("Project-dir junctions created");
         }
         Commands::Run(cmd) => {
@@ -243,7 +256,7 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|| std::env::current_dir().unwrap());
             runner::run(&cmd.script, &cmd.args, &project_dir, cmd.no_build)?;
         }
-        Commands::Super(cmd) => {
+        Commands::Setup(cmd) => {
             // ── 1. Clone ─────────────────────────────────────────────────
             let dest = cmd.directory.unwrap_or_else(|| {
                 let repo_name = cmd.url
@@ -256,7 +269,7 @@ fn main() -> Result<()> {
             });
 
             info!("════════════════════════════════════════════════════════");
-            info!("  KONG SUPER — {}", cmd.url);
+            info!("  KONG SETUP — {}", cmd.url);
             info!("════════════════════════════════════════════════════════");
 
             if dest.exists() {
@@ -316,15 +329,11 @@ fn main() -> Result<()> {
                 info!("  ✓ Homebrew bottles ({})", brew.packages.len());
             }
             link::create_project_junctions(&dest, &env_dir, &rules)?;
+            store::register_project(&project_name, &dest);
             info!("  ✓ Project junctions");
 
             // ── 4. Run scripts ───────────────────────────────────────────
-            let scripts_to_run: Vec<String> = if !cmd.run.is_empty() {
-                cmd.run
-            } else {
-                // Run all scripts from kong.rules
-                rules.scripts.keys().cloned().collect()
-            };
+            let scripts_to_run: Vec<String> = cmd.run;
 
             if scripts_to_run.is_empty() {
                 info!("No scripts to run");
@@ -358,7 +367,7 @@ fn main() -> Result<()> {
                 info!("════════════════════════════════════════════════════════");
             }
 
-            info!("SUPER complete → cd {}", dest.display());
+            info!("Setup complete → cd {}", dest.display());
         }
         Commands::Service(cmd) => {
             let project_dir = cmd.path
@@ -409,7 +418,23 @@ fn main() -> Result<()> {
                 std::fs::remove_dir_all(&env_dir)?;
                 info!(path = %env_dir.display(), "Removed RULEZ directory");
             }
+            store::unregister_project(&project_name);
             info!("✓ Deleted environment for {}", project_name);
+        }
+        Commands::Import(cmd) => {
+            let project_dir = cmd.path
+                .unwrap_or_else(|| std::env::current_dir().unwrap());
+            migrate::import_project(&project_dir)?;
+        }
+        Commands::Solidify(cmd) => {
+            let project_dir = cmd.path
+                .unwrap_or_else(|| std::env::current_dir().unwrap());
+            migrate::solidify_project(&project_dir)?;
+        }
+        Commands::Eject(cmd) => {
+            let project_dir = cmd.path
+                .unwrap_or_else(|| std::env::current_dir().unwrap());
+            migrate::eject_project(&project_dir)?;
         }
     }
 

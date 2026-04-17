@@ -270,7 +270,7 @@ fn remove_file_robust(p: &Path) -> Result<()> {
 /// is immediately free (VS Code file-watchers hold handles to directories but
 /// the rename succeeds on NTFS because handles are inode-based). Then delete
 /// the renamed copy, retrying as needed for transient AV/watcher locks.
-fn remove_dir_all_robust(path: &Path) -> Result<()> {
+pub fn remove_dir_all_robust(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }

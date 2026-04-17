@@ -10,7 +10,7 @@ pub struct Cli {
     pub verbose: bool,
 
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -24,13 +24,19 @@ pub enum Commands {
     /// Run a named script in the kong-managed environment
     Run(RunCmd),
     /// Clone + rules + use + run scripts — full end-to-end setup & smoke test
-    Super(SuperCmd),
+    Setup(SetupCmd),
     /// Start, stop, and monitor background services (postgres, redis, etc.)
     Service(ServiceCmd),
     /// Manage the central store
     Store(StoreCmd),
     /// Delete a project's KONG environment (RULEZ + junctions)
     Delete(DeleteCmd),
+    /// Import an existing project into the KONG store (moves local .venv/node_modules into the store)
+    Import(ImportCmd),
+    /// Copy packages from store into real local directories (standalone project)
+    Solidify(SolidifyCmd),
+    /// Remove all KONG artifacts and store-only deps from a project
+    Eject(EjectCmd),
     /// Open the KONG graphical interface
     Gui(GuiCmd),
     /// Run diagnostic checks
@@ -120,7 +126,7 @@ pub struct CloneCmd {
 }
 
 #[derive(Parser)]
-pub struct SuperCmd {
+pub struct SetupCmd {
     /// Repository URL to clone (e.g. https://github.com/owner/repo)
     pub url: String,
 
@@ -171,4 +177,25 @@ pub enum ServiceAction {
         #[arg(short = 'n', long, default_value = "50")]
         lines: usize,
     },
+}
+
+#[derive(Parser)]
+pub struct ImportCmd {
+    /// Path to project directory (defaults to current directory)
+    #[arg(short, long)]
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+pub struct SolidifyCmd {
+    /// Path to project directory (defaults to current directory)
+    #[arg(short, long)]
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+pub struct EjectCmd {
+    /// Path to project directory (defaults to current directory)
+    #[arg(short, long)]
+    pub path: Option<PathBuf>,
 }

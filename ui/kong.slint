@@ -71,6 +71,9 @@ export component KongWindow inherits Window {
     callback run-script(string, string);         // (script-name, project-name)
     callback open-project-terminal(string);      // (project-path)
     callback delete-project(string);             // (project-name)
+    callback import-project(string);             // (project-path) — import local envs into store
+    callback solidify-project(string);           // (project-path) — copy store into local
+    callback eject-project(string);              // (project-name) — remove all KONG artifacts
     callback select-project(string);             // (project-name) — for packages tab
     callback run-doctor();
     callback clone-go(string, string, bool, bool, bool);  // (url, dest, do-rules, do-use, do-run)
@@ -154,7 +157,7 @@ export component KongWindow inherits Window {
                     ListView {
                         vertical-stretch: 1;
                         for project[idx] in root.projects : Rectangle {
-                            height: 100px;
+                            height: 110px;
                             border-width: 1px;
                             border-color: #e0e0e0;
                             border-radius: 6px;
@@ -200,6 +203,24 @@ export component KongWindow inherits Window {
                                             text: "Delete";
                                             min-height: 30px;
                                             clicked => { root.delete-project(project.name); }
+                                        }
+                                    }
+                                    HorizontalBox {
+                                        spacing: 4px;
+                                        Button {
+                                            text: "Import";
+                                            min-height: 28px;
+                                            clicked => { root.import-project(project.path); }
+                                        }
+                                        Button {
+                                            text: "Solidify";
+                                            min-height: 28px;
+                                            clicked => { root.solidify-project(project.path); }
+                                        }
+                                        Button {
+                                            text: "Eject";
+                                            min-height: 28px;
+                                            clicked => { root.eject-project(project.name); }
                                         }
                                     }
                                 }

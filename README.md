@@ -87,7 +87,7 @@ Or do it all in one shot:
 
 ```bash
 # Clone, install everything, and run smoke tests
-kong super https://github.com/owner/repo -r build -r test
+kong setup https://github.com/owner/repo -r build -r test
 ```
 
 Second project using the same packages? `kong rules` + `kong use` — instant, no downloads, just links.
@@ -137,13 +137,16 @@ downloads + verifies     →          global store (written once)
 | `kong run <script>` | Run a script from `package.json` or `pyproject.toml` |
 | `kong run <script> -- <args>` | Pass extra arguments to the script |
 | `kong run <script> --path <dir>` | Run a script in a different project directory |
-| `kong super <url> [dir]` | Clone + rules + use + run — full end-to-end setup & smoke test |
-| `kong super <url> -r build -r test` | Run only specific scripts after setup |
+| `kong setup <url> [dir]` | Clone + rules + use in one command |
+| `kong setup <url> -r build -r test` | Also run specific scripts after setup |
 | `kong service start [name]` | Start a service (or all) as a background daemon |
 | `kong service stop [name]` | Stop a running service (or all) gracefully |
 | `kong service status` | Show running services, ports, PIDs |
 | `kong service logs <name>` | Tail stdout/stderr of a service |
 | `kong delete [--path <dir>]` | Delete a project's KONG environment (RULEZ + junctions) |
+| `kong import [--path <dir>]` | Import existing local envs into the global store (no re-download) |
+| `kong solidify [--path <dir>]` | Copy packages from store into real local directories (standalone) |
+| `kong eject [--path <dir>]` | Remove all KONG artifacts and store-only deps from a project |
 | `kong gui [--path <dir>]` | Open the native GUI (Slint, Cupertino style on macOS) |
 | `kong store path` | Print the global store path |
 | `kong doctor` | Check store integrity and environment health |
@@ -158,7 +161,8 @@ downloads + verifies     →          global store (written once)
 |-----------|--------|--------------------|
 | Python | `requirements.txt`, `pyproject.toml` | `uv.lock`, `poetry.lock`, `Pipfile.lock` |
 | Node.js | `package.json` | `package-lock.json`, `pnpm-lock.yaml` |
-| Rust | `Cargo.toml` | `Cargo.lock` ✓ || Homebrew | `Brewfile` | — (fetches latest bottles from GHCR) |
+| Rust | `Cargo.toml` | `Cargo.lock` |
+| Homebrew | `Brewfile` | — (fetches latest bottles from GHCR) |
 ---
 
 ## The Store
@@ -195,13 +199,102 @@ Packages are stored **once** and **hard-linked** into every project that needs t
 
 ---
 
+## Homebrew / System Dependencies
+
+KONG replaces the `brew` CLI entirely. Drop a `Brewfile` into your project and KONG handles the rest.
+
+### How it works
+
+1. **`kong rules`** detects your `Brewfile`, queries the [Homebrew Formulae API](https://formulae.brew.sh/api/) for each formula, and walks the full transitive dependency tree (BFS).
+2. For each formula, KONG downloads the pre-built **bottle** directly from GitHub Container Registry (GHCR) — no `brew` CLI needed.
+3. Bottles are extracted into the global store (`store/brew/<name>-<version>/`), Mach-O binaries are patched to fix `@@HOMEBREW_PREFIX@@` placeholders, and re-codesigned for macOS Sequoia.
+4. **`kong run`** automatically injects brew `bin/` directories into `PATH` and `lib/` directories into `DYLD_LIBRARY_PATH` / `PKG_CONFIG_PATH` so tools like `psql`, `redis-server`, and `jq` just work.
+
+### Example Brewfile
+
+```ruby
+brew "jq"
+brew "postgresql@17"
+brew "redis"
+```
+
+### Usage
+
+```bash
+kong rules              # detects Brewfile, downloads jq + postgres + redis + all transitive deps
+kong use kong.rules     # links environments (brew bottles are available via kong run)
+kong run health         # runs: curl ... | jq . — jq is found via KONG's PATH injection
+
+# Services (postgres, redis) are auto-inferred from brew packages
+kong service start      # starts postgres + redis as background daemons
+kong service status     # shows PIDs, ports, status
+kong service logs redis # tail redis logs
+kong service stop       # stops all services
+```
+
+### What KONG manages from Homebrew
+
+| What | Example | How |
+|------|---------|-----|
+| CLI tools | `jq`, `curl`, `git` | Bottle downloaded, `bin/` injected into PATH |
+| Databases | `postgresql@17`, `redis` | Bottle + runtime data dirs in RULEZ, managed as services |
+| Shared libraries | `openssl`, `libpq`, `ca-certificates` | Transitive deps resolved automatically, `lib/` injected |
+| Build tools | `cmake`, `pkg-config` | Available during `kong run` via PATH injection |
+
+> **No Homebrew installation required.** KONG talks to GHCR directly to download bottles. It supports `arm64_sequoia`, `arm64_sonoma`, and platform-independent (`all`) bottle tags. Intel Macs and Linux Homebrew are planned.
+
+---
+
+## Migration Commands
+
+KONG provides three commands to move projects in and out of KONG management:
+
+### `kong import` — adopt an existing project
+
+```bash
+cd my-project          # has a real .venv/ and node_modules/ already
+kong import            # moves packages to the global store, replaces with symlinks
+```
+
+What happens:
+1. Scans existing `.venv` and `node_modules` and copies packages into the store
+2. Removes the local directories
+3. Runs `kong rules` + `kong use` to recreate them as symlinks into the store
+
+Your project keeps working exactly as before — but now shares packages with all your other projects.
+
+### `kong solidify` — make a project standalone
+
+```bash
+kong solidify          # copies packages from store into real local .venv / node_modules
+```
+
+After solidify, the project works without KONG. Useful for deploying to a machine without KONG, or for handing off to someone who doesn't use it.
+
+### `kong eject` — fully remove KONG from a project
+
+```bash
+kong eject             # removes everything KONG-related
+```
+
+What gets removed:
+- `.venv` and `node_modules` symlinks
+- RULEZ directory for this project
+- `kong.rules` file
+- Store entries used **only** by this project (shared packages are kept)
+- Project entry from KONG's registry
+
+After eject, the project has no trace of KONG. Run `pip install` / `npm install` normally to restore dependencies.
+
+---
+
 ## Real Project Example — DummyKong
 
 [DummyKong](https://github.com/iscreamparis/DummyKong) is KONG's reference test project: a Flask backend + Vite/Vue frontend + Rust fractal renderer, all managed by KONG.
 
 ```bash
-# One command does everything: clone → rules → use → run
-kong super https://github.com/iscreamparis/DummyKong -r build -r fractal
+# Clone, install everything, and run smoke tests
+kong setup https://github.com/iscreamparis/DummyKong -r fractal -r build
 ```
 
 Or step by step:
@@ -239,12 +332,11 @@ No pip. No npm. No brew. No conda. No rustup. Just KONG.
 - [x] **Mach-O fixup** — rewrites `@@HOMEBREW_PREFIX@@` placeholders in binaries + codesigns for macOS Sequoia
 - [x] **BFS transitive deps** — walks the full dependency tree so `psql`, `redis-server`, `jq` all get their shared libs
 - [x] **Runtime PATH/lib injection** — `kong run` injects brew `bin/` and `lib/` into the script environment automatically
-- [ ] **`ca-certificates` bottle** — ARM64 Sequoia bottle tag not yet available upstream
 
 ### v0.4 — End-to-end workflow ✅
-- [x] **`kong super <url>`** — one command to clone, generate rules, set up environments, and run scripts
+- [x] **`kong setup <url>`** — one command to clone, generate rules, set up environments, and run scripts
 - [x] **Lazy cargo build** — `kong run` auto-builds Rust binaries when the target is missing
-- [ ] **`kong super` parallel script execution** — run independent scripts concurrently
+- [ ] **`kong setup` parallel script execution** — run independent scripts concurrently
 
 ### v0.5 — Service management ✅
 - [x] **`kong service start <name>`** — start a service (postgres, redis) as a background daemon with pid tracking
@@ -263,11 +355,16 @@ No pip. No npm. No brew. No conda. No rustup. Just KONG.
 - [x] **Doctor tab** — system health checks with diagnostic output
 - [x] **`kong delete`** — CLI command to remove a project's KONG environment (RULEZ + junctions)
 
-### v0.7 — Migration ← **current**
-- [ ] **`kong import`** — convert an existing project (with local `.venv`, `node_modules`, `.cargo`) to the KONG way. Moves already-installed packages into the global store instead of re-downloading them, then replaces the local copies with links.
-- [ ] **`kong eject`** — convert a KONG-managed project back to standalone. Copies packages from the store into real local directories so the project works without KONG.
+### v0.7 — Migration ✅
+- [x] **`kong import`** — convert an existing project (with local `.venv`, `node_modules`) into KONG. Moves installed packages into the global store instead of re-downloading, then replaces local copies with symlinks.
+- [x] **`kong solidify`** — convert a KONG-managed project back to standalone. Copies packages from the store into real local directories so the project works without KONG.
+- [x] **`kong eject`** — full removal: deletes symlinks, RULEZ environment, `kong.rules`, and any store entries used exclusively by this project. The project is left clean with no trace of KONG.
+- [x] **`kong super` → `kong setup`** — renamed for clarity.
+- [x] **Project registry** — KONG tracks managed projects in `projects.json` instead of guessing paths. GUI and eject use the registry for reliable project discovery.
+- [x] **Single-instance GUI** — `flock()` prevents multiple GUI windows from opening simultaneously.
+- [x] **`ca-certificates` bottle fix** — platform-independent (`all`) bottles now resolved correctly.
 
-### v0.8 — Performance
+### v0.8 — Performance ← **current**
 - [ ] **Parallel downloads** — all packages fetched concurrently (currently sequential)
 - [ ] **Progress bars** — `indicatif` integration for long downloads
 - [ ] **Resume on failure** — partial downloads restart from where they stopped
@@ -330,7 +427,6 @@ KONG is early-stage software. Here's what doesn't work yet — no surprises.
 
 ### Homebrew
 - **macOS only.** Brew bottle support currently targets macOS (arm64_sequoia, arm64_sonoma). Linux Homebrew (linuxbrew) is not yet supported.
-- **`ca-certificates` missing.** The `ca-certificates` formula has no ARM64 Sequoia bottle tag upstream — skipped during dependency resolution.
 - **No cask support.** Only formulas (command-line tools) are supported — GUI apps via `brew cask` are not handled.
 - **No version pinning.** KONG always fetches the latest stable bottle. Version-locked Brewfiles are not respected.
 

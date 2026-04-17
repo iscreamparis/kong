@@ -322,6 +322,13 @@ fn pick_bottle(
         }
     }
 
+    // Some formulae (e.g. ca-certificates) are platform-independent and only
+    // ship an "all" bottle.
+    if let Some(entry) = files.get("all") {
+        debug!(preferred = preferred_tag, used = "all", "Using platform-independent bottle");
+        return extract_bottle_entry(entry);
+    }
+
     None
 }
 

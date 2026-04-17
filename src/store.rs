@@ -1,6 +1,58 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+
+// ── Project registry ────────────────────────────────────────────────────────
+
+/// Path to the project registry file.
+fn registry_path() -> Result<PathBuf> {
+    Ok(install_root()?.join("projects.json"))
+}
+
+/// Read the registry: { "ProjectName": "/absolute/path/to/project", ... }
+pub fn read_registry() -> HashMap<String, PathBuf> {
+    let path = match registry_path() {
+        Ok(p) => p,
+        Err(_) => return HashMap::new(),
+    };
+    let data = match std::fs::read_to_string(&path) {
+        Ok(d) => d,
+        Err(_) => return HashMap::new(),
+    };
+    let map: HashMap<String, String> = match serde_json::from_str(&data) {
+        Ok(m) => m,
+        Err(_) => return HashMap::new(),
+    };
+    map.into_iter().map(|(k, v)| (k, PathBuf::from(v))).collect()
+}
+
+/// Register a project (called by use/setup/clone/import).
+pub fn register_project(name: &str, project_dir: &Path) {
+    let mut reg = read_registry();
+    let abs = std::fs::canonicalize(project_dir)
+        .unwrap_or_else(|_| project_dir.to_path_buf());
+    reg.insert(name.to_string(), abs);
+    if let Ok(path) = registry_path() {
+        let map: HashMap<&str, String> = reg.iter()
+            .map(|(k, v)| (k.as_str(), v.to_string_lossy().into_owned()))
+            .collect();
+        let _ = std::fs::write(&path, serde_json::to_string_pretty(&map).unwrap_or_default());
+    }
+}
+
+/// Remove a project from the registry (called by delete/eject).
+pub fn unregister_project(name: &str) {
+    let mut reg = read_registry();
+    if reg.remove(name).is_some() {
+        if let Ok(path) = registry_path() {
+            let map: HashMap<&str, String> = reg.iter()
+                .map(|(k, v)| (k.as_str(), v.to_string_lossy().into_owned()))
+                .collect();
+            let _ = std::fs::write(&path, serde_json::to_string_pretty(&map).unwrap_or_default());
+        }
+    }
+}
 
 // ── Store root detection ────────────────────────────────────────────────────
 
