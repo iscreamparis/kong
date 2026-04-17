@@ -13,6 +13,38 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use tracing::{debug, info};
 
+/// Check whether a process with the given PID is alive.
+#[cfg(unix)]
+pub(crate) fn is_process_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(windows)]
+pub(crate) fn is_process_alive(pid: u32) -> bool {
+    use std::process::Command;
+    Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+        .map(|o| {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            !stdout.contains("No tasks") && stdout.contains(&pid.to_string())
+        })
+        .unwrap_or(false)
+}
+
+/// Terminate a process by PID.
+#[cfg(unix)]
+fn terminate_process(pid: u32) {
+    unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+}
+
+#[cfg(windows)]
+fn terminate_process(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .output();
+}
+
 use crate::config::{KongRules, ServiceEntry};
 use crate::store;
 
@@ -366,10 +398,8 @@ fn stop_one(
     if svc.stop_cmd.starts_with("signal:") {
         // Kill by signal
         if let Some(pid) = pid {
-            info!(service = %svc.name, pid, "Sending SIGTERM");
-            unsafe {
-                libc::kill(pid as i32, libc::SIGTERM);
-            }
+            info!(service = %svc.name, pid, "Sending terminate signal");
+            terminate_process(pid);
             // Wait briefly for clean shutdown
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
@@ -407,9 +437,7 @@ fn read_pid_status(paths: &ServicePaths) -> (&'static str, Option<u32>) {
 
     match pid {
         Some(p) => {
-            // Check if process is alive
-            let alive = unsafe { libc::kill(p as i32, 0) == 0 };
-            if alive {
+            if is_process_alive(p) {
                 ("running", Some(p))
             } else {
                 ("dead", Some(p)) // stale pid file
