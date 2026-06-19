@@ -6,15 +6,22 @@ use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
-use crate::config::{self, KongRules};
+use crate::config::{self, KongRules, NodeSection, PackageEntry, PythonSection, RuntimeEntry};
 use crate::link;
 use crate::store;
 
 // ── kong import ─────────────────────────────────────────────────────────────
 
-/// Convert an existing project (with local `.venv`, `node_modules`) to the
-/// KONG way.  Moves already-installed packages into the global store instead
-/// of re-downloading them, then replaces the local copies with links.
+/// Convert an existing project (with an installed venv + `node_modules`) to the
+/// KONG way by **adopting** the already-installed packages byte-for-byte.
+///
+/// This is a COPY-ADOPT, not a re-resolve: for every ecosystem that already has
+/// an installed environment, we copy the exact installed distributions (incl.
+/// native `.so` / `.node` binaries) into the content-addressed store and build
+/// `kong.rules` from that installed set — nothing is re-resolved or re-downloaded
+/// from PyPI/npm.  Only ecosystems with NO installed environment fall back to the
+/// manifest-driven resolver (`generate_rules`) so a genuinely-missing dep can
+/// still be fetched.
 pub fn import_project(project_dir: &Path) -> Result<()> {
     let store_root = store::store_root()?;
     let project_name = project_dir
@@ -24,39 +31,52 @@ pub fn import_project(project_dir: &Path) -> Result<()> {
 
     info!(project = %project_name, "Importing existing project into KONG");
 
-    // ── 1. Pre-populate the store from local environments ───────────────
-    //    This ensures generate_rules will find packages already in the store
-    //    and skip downloading them from the internet.
-    let py_imported = prepopulate_python_store(project_dir, &store_root)?;
-    let node_imported = prepopulate_node_store(project_dir, &store_root)?;
-    if py_imported > 0 {
-        info!(count = py_imported, "Python packages moved to store");
+    // ── 1. Adopt installed environments: copy packages into the store and
+    //    build sections directly from what is installed (no re-resolve). ──
+    let adopted_python = adopt_python(project_dir, &store_root)?;
+    let adopted_node = adopt_node(project_dir, &store_root)?;
+
+    // ── 2. Build kong.rules. Start from the manifest-driven resolver so
+    //    scripts / services / brew / rust are still discovered, then OVERRIDE
+    //    the python/node sections with the adopted (copied) sets when present.
+    //    For an ecosystem we adopted, the resolver must NOT run (it would
+    //    re-download); so we hide that ecosystem's manifest from the resolver.
+    info!("Generating kong.rules");
+    let mut rules = generate_rules_skipping(
+        project_dir,
+        adopted_python.is_some(),
+        adopted_node.is_some(),
+    )?;
+
+    if let Some((section, runtime)) = adopted_python {
+        info!(count = section.packages.len(), "Python packages adopted from install (copied, not re-downloaded)");
+        rules.python = Some(section);
+        // Ensure the runtimes section advertises the adopted runtime so
+        // build_venv can locate a python executable.
+        ensure_python_runtime_entry(&mut rules, runtime);
     }
-    if node_imported > 0 {
-        info!(count = node_imported, "Node packages moved to store");
+    if let Some(section) = adopted_node {
+        info!(count = section.packages.len(), "Node packages adopted from install (copied, not re-downloaded)");
+        rules.node = Some(section);
     }
 
-    // ── 2. Remove local environments before generate_rules ──────────────
-    //    generate_rules doesn't need .venv or node_modules — it reads
-    //    manifests (requirements.txt, package.json, Cargo.toml) directly.
-    let venv = project_dir.join(".venv");
-    if venv.exists() && !venv.is_symlink() {
-        info!("Removing local .venv (packages are now in the store)");
-        link::remove_dir_all_robust(&venv)?;
+    let rules_path = project_dir.join("kong.rules");
+    config::write_rules(&rules, &rules_path)?;
+    info!(path = %rules_path.display(), "kong.rules written");
+
+    // ── 3. Remove the local installed environments now that they live in the
+    //    store; they will be recreated as links into the RULEZ env. ──────
+    for venv in discover_venvs(project_dir) {
+        if venv.exists() && !venv.is_symlink() {
+            info!(path = %venv.display(), "Removing local venv (packages are now in the store)");
+            link::remove_dir_all_robust(&venv)?;
+        }
     }
     let nm = project_dir.join("node_modules");
     if nm.exists() && !nm.is_symlink() {
         info!("Removing local node_modules (packages are now in the store)");
         link::remove_dir_all_robust(&nm)?;
     }
-
-    // ── 3. Generate kong.rules (reuses full pipeline: manifests, brew,
-    //    scripts, services — but skips downloads for pre-populated packages)
-    info!("Generating kong.rules");
-    let rules = config::generate_rules(project_dir, false)?;
-    let rules_path = project_dir.join("kong.rules");
-    config::write_rules(&rules, &rules_path)?;
-    info!(path = %rules_path.display(), "kong.rules written");
 
     // ── 4. Set up RULEZ-based environments (like `kong use`) ────────────
     let env_dir = store::rulez_dir(&project_name)?;
@@ -84,25 +104,137 @@ pub fn import_project(project_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Scan local `.venv/` site-packages and copy each package into the global
-/// store.  Returns the number of packages imported.
-fn prepopulate_python_store(project_dir: &Path, store_root: &Path) -> Result<usize> {
-    let venv = project_dir.join(".venv");
-    if !venv.exists() || venv.is_symlink() {
-        return Ok(0);
+/// Run the manifest-driven resolver, but optionally hide the python / node
+/// manifests so already-adopted ecosystems are NOT re-resolved/re-downloaded.
+///
+/// KONG stays general: we don't special-case any project.  We copy the project
+/// into a temp dir minus the manifests we want skipped, run `generate_rules`
+/// there, then return its non-python/node parts (scripts/services/brew/rust).
+/// When nothing is skipped this is just `generate_rules(project_dir)`.
+fn generate_rules_skipping(
+    project_dir: &Path,
+    skip_python: bool,
+    skip_node: bool,
+) -> Result<KongRules> {
+    if !skip_python && !skip_node {
+        return config::generate_rules(project_dir, false);
     }
 
-    let site_packages = match find_site_packages(&venv) {
-        Ok(sp) => sp,
-        Err(_) => return Ok(0),
+    // Build a shadow project dir: hard-link/copy everything except the
+    // manifests for the ecosystems we already adopted, so the resolver sees
+    // no deps there and skips network resolution for them.
+    let shadow = tempfile::TempDir::new().context("failed to create shadow project dir")?;
+    let python_manifests = [
+        "requirements.txt", "requirements.lock", "pyproject.toml",
+        "Pipfile", "Pipfile.lock", "poetry.lock", "setup.py", "setup.cfg",
+        "uv.lock",
+    ];
+    let node_manifests = ["package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"];
+
+    for entry in std::fs::read_dir(project_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        // Never copy heavy/irrelevant trees into the shadow.
+        if name_str == ".venv" || name_str == "venv" || name_str == "node_modules"
+            || name_str == ".git" || name_str == "kong.rules"
+        {
+            continue;
+        }
+        if skip_python && python_manifests.contains(&name_str.as_ref()) {
+            continue;
+        }
+        if skip_node && node_manifests.contains(&name_str.as_ref()) {
+            continue;
+        }
+        let dst = shadow.path().join(&name);
+        if entry.path().is_dir() {
+            copy_dir_recursive(&entry.path(), &dst)?;
+        } else {
+            std::fs::copy(entry.path(), &dst)?;
+        }
+    }
+
+    config::generate_rules(shadow.path(), false)
+}
+
+/// Make sure `rules.runtimes.python` points at a usable runtime so `build_venv`
+/// can find a python executable.  We reuse the resolver's runtime entry when it
+/// already produced one (same flow as a normal `kong use`); otherwise we ensure
+/// a kong-managed runtime matching the adopted venv's major.minor.
+fn ensure_python_runtime_entry(rules: &mut KongRules, adopted: RuntimeEntry) {
+    let already = rules
+        .runtimes
+        .as_ref()
+        .and_then(|r| r.python.as_ref())
+        .is_some();
+    if already {
+        return;
+    }
+    let runtimes = rules.runtimes.get_or_insert_with(|| config::RuntimeSection {
+        python: None,
+        node: None,
+        rust: None,
+    });
+    runtimes.python = Some(adopted);
+}
+
+// ── Python copy-adopt ────────────────────────────────────────────────────────
+
+/// Discover candidate venv directories inside the project (project-agnostic:
+/// any dir containing a `pyvenv.cfg`).  Common names are checked first, then a
+/// shallow scan picks up anything else.
+fn discover_venvs(project_dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    let consider = |p: PathBuf, found: &mut Vec<PathBuf>, seen: &mut std::collections::HashSet<PathBuf>| {
+        if p.join("pyvenv.cfg").exists() && seen.insert(p.clone()) {
+            found.push(p);
+        }
     };
 
-    // Detect Python version from pyvenv.cfg → compute tags
+    for name in [".venv", "venv", "env", ".env"] {
+        consider(project_dir.join(name), &mut found, &mut seen);
+    }
+    // Shallow scan for any other venv-shaped dir at the project root.
+    if let Ok(rd) = std::fs::read_dir(project_dir) {
+        for entry in rd.flatten() {
+            if entry.path().is_dir() {
+                consider(entry.path(), &mut found, &mut seen);
+            }
+        }
+    }
+    found
+}
+
+/// Copy each installed Python distribution from the project's venv into the
+/// store byte-for-byte (incl. native `.so`/`.pyd`), and build a `PythonSection`
+/// describing the adopted set.  Returns `None` if no installed venv is found
+/// (so the caller falls back to the resolver).
+fn adopt_python(project_dir: &Path, store_root: &Path) -> Result<Option<(PythonSection, RuntimeEntry)>> {
+    let venv = match discover_venvs(project_dir).into_iter().next() {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    let site_packages = match find_site_packages(&venv) {
+        Ok(sp) => sp,
+        Err(e) => {
+            warn!("venv at {} has no site-packages: {e}", venv.display());
+            return Ok(None);
+        }
+    };
+
+    // Detect the installed Python version → compute the ABI / platform tags.
+    // The store dir name MUST match what the resolver/build_venv expect so the
+    // linker finds the entry: python/libs/{name}-{ver}-{cpXY}-{platform}.
     let py_version = read_pyvenv_version(&venv).unwrap_or_else(|| "3.12.0".to_string());
     let py_tag = short_python_tag(&py_version);
     let platform = config::platform_tag();
 
-    let mut count = 0;
+    info!(venv = %venv.display(), version = %py_version, "Adopting installed Python packages");
+
+    let mut packages = Vec::new();
     for entry in std::fs::read_dir(&site_packages)? {
         let entry = entry?;
         let name_os = entry.file_name();
@@ -111,14 +243,13 @@ fn prepopulate_python_store(project_dir: &Path, store_root: &Path) -> Result<usi
             continue;
         }
 
-        // Read METADATA for name and version
         let metadata_path = entry.path().join("METADATA");
         let (pkg_name, pkg_version) = match read_dist_info_metadata(&metadata_path) {
             Some(nv) => nv,
             None => continue,
         };
 
-        // Skip pip/setuptools/wheel — these are venv internals
+        // Skip venv internals — they're provided by the kong runtime.
         let lower = pkg_name.to_lowercase();
         if lower == "pip" || lower == "setuptools" || lower == "wheel" {
             continue;
@@ -130,99 +261,144 @@ fn prepopulate_python_store(project_dir: &Path, store_root: &Path) -> Result<usi
         );
         let full_store_path = store_root.join(&store_path_rel);
 
+        // Copy byte-for-byte unless already present (idempotent re-import).
         if full_store_path.exists() {
-            debug!(pkg = %pkg_name, "Already in store, skipping");
-            continue;
-        }
-
-        // Read RECORD for the file list
-        let record_path = entry.path().join("RECORD");
-        let record_files = read_record_files(&record_path);
-
-        info!(pkg = %pkg_name, ver = %pkg_version, "Importing to store");
-        std::fs::create_dir_all(&full_store_path)?;
-
-        if record_files.is_empty() {
-            copy_dist_info_and_package(
-                &site_packages,
-                &entry.path(),
-                &pkg_name,
-                &full_store_path,
-            )?;
+            debug!(pkg = %pkg_name, "Already in store, reusing");
         } else {
-            for rel_path in &record_files {
-                let src = site_packages.join(rel_path);
-                let dst = full_store_path.join(rel_path);
-                if src.exists() {
-                    if let Some(parent) = dst.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    if src.is_dir() {
-                        std::fs::create_dir_all(&dst)?;
-                    } else {
-                        std::fs::copy(&src, &dst)?;
-                    }
-                }
-            }
+            info!(pkg = %pkg_name, ver = %pkg_version, "Copying installed package to store");
+            std::fs::create_dir_all(&full_store_path)?;
+            copy_installed_python_dist(&site_packages, &entry.path(), &pkg_name, &full_store_path)?;
+            store::write_verified_marker(&full_store_path, "imported")?;
         }
 
-        store::write_verified_marker(&full_store_path, "imported")?;
-        count += 1;
+        packages.push(PackageEntry {
+            name: pkg_name,
+            version: pkg_version,
+            hash: None,
+            store_path: store_path_rel,
+            source_url: None,
+        });
     }
 
-    Ok(count)
+    if packages.is_empty() {
+        return Ok(None);
+    }
+
+    let section = PythonSection {
+        version: py_version.clone(),
+        platform,
+        packages,
+    };
+    // Reference a kong-managed runtime of the same major.minor as the install,
+    // so the ABI of the copied native modules matches the python we link.
+    let runtime = match crate::python::runtime::ensure_runtime(store_root, &major_minor(&py_version)) {
+        Ok(rt) => RuntimeEntry { version: rt.version, store_path: rt.store_path },
+        Err(e) => {
+            warn!("could not ensure kong python runtime for {py_version}: {e}; \
+                   build_venv will look for an existing runtime in rules");
+            RuntimeEntry { version: py_version, store_path: String::new() }
+        }
+    };
+    Ok(Some((section, runtime)))
 }
 
-/// Scan local `node_modules/` and copy each package into the global store.
-/// Returns the number of packages imported.
-fn prepopulate_node_store(project_dir: &Path, store_root: &Path) -> Result<usize> {
+/// Copy ONE installed distribution from site-packages into `store_dir`.
+///
+/// Uses the `.dist-info/RECORD` manifest (the authoritative file list, which
+/// includes native `.so`/`.pyd`/data files) when present so we copy exactly
+/// what was installed; falls back to copying the `.dist-info` dir + the guessed
+/// package dir when RECORD is missing (editable/legacy installs).
+fn copy_installed_python_dist(
+    site_packages: &Path,
+    dist_info_dir: &Path,
+    pkg_name: &str,
+    store_dir: &Path,
+) -> Result<()> {
+    let record_files = read_record_files(&dist_info_dir.join("RECORD"));
+    if record_files.is_empty() {
+        copy_dist_info_and_package(site_packages, dist_info_dir, pkg_name, store_dir)?;
+        return Ok(());
+    }
+    for rel_path in &record_files {
+        // RECORD paths are relative to site-packages. Skip entries that escape
+        // it (e.g. "../../Scripts/foo.exe") — those are console scripts the
+        // kong venv regenerates, not package payload.
+        if rel_path.starts_with("..") || Path::new(rel_path).is_absolute() {
+            continue;
+        }
+        let src = site_packages.join(rel_path);
+        let dst = store_dir.join(rel_path);
+        if !src.exists() {
+            continue;
+        }
+        if src.is_dir() {
+            std::fs::create_dir_all(&dst)?;
+        } else {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&src, &dst)
+                .with_context(|| format!("failed to copy {}", src.display()))?;
+        }
+    }
+    Ok(())
+}
+
+// ── Node copy-adopt ──────────────────────────────────────────────────────────
+
+/// Copy each installed Node package from `node_modules/` into the store
+/// byte-for-byte (incl. native `.node` addons) and build a `NodeSection`.
+/// Returns `None` when there is no installed `node_modules` (caller falls back
+/// to the resolver).
+fn adopt_node(project_dir: &Path, store_root: &Path) -> Result<Option<NodeSection>> {
     let nm = project_dir.join("node_modules");
     if !nm.exists() || nm.is_symlink() {
-        return Ok(0);
+        return Ok(None);
     }
 
-    let mut count = 0;
-
+    let mut packages = Vec::new();
     for entry in std::fs::read_dir(&nm)? {
         let entry = entry?;
         let name_str = entry.file_name().to_string_lossy().to_string();
 
-        // Skip dotfiles, .bin, lockfiles
+        // Skip dotfiles, .bin, lockfiles, hoisting metadata.
         if name_str.starts_with('.') || name_str == ".bin" || name_str == ".package-lock.json" {
             continue;
         }
 
         if name_str.starts_with('@') {
-            // Scoped package — one level deeper
             if !entry.path().is_dir() {
                 continue;
             }
             for sub in std::fs::read_dir(entry.path())? {
                 let sub = sub?;
                 let scoped_name = format!("{}/{}", name_str, sub.file_name().to_string_lossy());
-                if import_single_node_package(&nm, &scoped_name, store_root)? {
-                    count += 1;
+                if let Some(pkg) = adopt_single_node_package(&nm, &scoped_name, store_root)? {
+                    packages.push(pkg);
                 }
             }
-        } else if import_single_node_package(&nm, &name_str, store_root)? {
-            count += 1;
+        } else if let Some(pkg) = adopt_single_node_package(&nm, &name_str, store_root)? {
+            packages.push(pkg);
         }
     }
 
-    Ok(count)
+    if packages.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(NodeSection { packages }))
 }
 
-/// Copy a single Node package from node_modules/ into the store.
-/// Returns true if the package was newly imported.
-fn import_single_node_package(
+/// Copy one installed Node package into the store under the `package/`
+/// sub-layout `build_node_modules` expects, and return its `PackageEntry`.
+fn adopt_single_node_package(
     nm_dir: &Path,
     pkg_name: &str,
     store_root: &Path,
-) -> Result<bool> {
+) -> Result<Option<PackageEntry>> {
     let pkg_dir = nm_dir.join(pkg_name);
     let pkg_json_path = pkg_dir.join("package.json");
     if !pkg_json_path.exists() {
-        return Ok(false);
+        return Ok(None);
     }
 
     let content = std::fs::read_to_string(&pkg_json_path)?;
@@ -243,19 +419,24 @@ fn import_single_node_package(
     let full_store_path = store_root.join(&store_path_rel);
 
     if full_store_path.exists() {
-        debug!(pkg = %name, "Already in store, skipping");
-        return Ok(false);
+        debug!(pkg = %name, "Already in store, reusing");
+    } else {
+        // npm tarballs extract with a `package/` subdirectory convention;
+        // replicate it so build_node_modules finds the content root.
+        let store_pkg_dir = full_store_path.join("package");
+        info!(pkg = %name, ver = %version, "Copying installed package to store");
+        std::fs::create_dir_all(&store_pkg_dir)?;
+        copy_dir_recursive(&pkg_dir, &store_pkg_dir)?;
+        store::write_verified_marker(&full_store_path, "imported")?;
     }
 
-    // npm tarballs extract with a `package/` subdirectory convention;
-    // replicate that layout so build_node_modules sees what it expects.
-    let store_pkg_dir = full_store_path.join("package");
-    info!(pkg = %name, ver = %version, "Importing to store");
-    std::fs::create_dir_all(&store_pkg_dir)?;
-    copy_dir_recursive(&pkg_dir, &store_pkg_dir)?;
-    store::write_verified_marker(&full_store_path, "imported")?;
-
-    Ok(true)
+    Ok(Some(PackageEntry {
+        name,
+        version,
+        hash: None,
+        store_path: store_path_rel,
+        source_url: None,
+    }))
 }
 
 // ── kong solidify ───────────────────────────────────────────────────────────
@@ -686,7 +867,6 @@ fn short_python_tag(full_version: &str) -> String {
 }
 
 /// Convert "3.12.9" → "3.12"
-#[allow(dead_code)]
 fn major_minor(full_version: &str) -> String {
     let mut parts = full_version.splitn(3, '.');
     let major = parts.next().unwrap_or("3");
@@ -715,4 +895,117 @@ fn kong_python_exe(store_root: &Path, rules: &KongRules) -> Option<PathBuf> {
         if exe2.exists() { return Some(exe2); }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a fake site-packages with one distribution that has a native
+    /// extension recorded in RECORD, then assert copy-adopt reproduces every
+    /// file (incl. the `.so`) byte-for-byte under the store entry.
+    #[test]
+    fn copy_installed_python_dist_preserves_native_so() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let site = tmp.path().join("site-packages");
+        let pkg = site.join("pydantic_core");
+        std::fs::create_dir_all(&pkg).unwrap();
+        // A native extension module — the exact thing re-download breaks.
+        let so_bytes: &[u8] = &[0x7f, b'E', b'L', b'F', 1, 2, 3, 4];
+        std::fs::write(pkg.join("_pydantic_core.so"), so_bytes).unwrap();
+        std::fs::write(pkg.join("__init__.py"), b"# pkg").unwrap();
+
+        let dist_info = site.join("pydantic_core-2.0.0.dist-info");
+        std::fs::create_dir_all(&dist_info).unwrap();
+        std::fs::write(
+            dist_info.join("METADATA"),
+            "Name: pydantic_core\nVersion: 2.0.0\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dist_info.join("RECORD"),
+            "pydantic_core/__init__.py,,\n\
+             pydantic_core/_pydantic_core.so,,\n\
+             pydantic_core-2.0.0.dist-info/METADATA,,\n\
+             pydantic_core-2.0.0.dist-info/RECORD,,\n",
+        )
+        .unwrap();
+
+        let store_dir = tmp.path().join("store_entry");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        copy_installed_python_dist(&site, &dist_info, "pydantic_core", &store_dir).unwrap();
+
+        // The native .so must be present and identical.
+        let copied_so = store_dir.join("pydantic_core").join("_pydantic_core.so");
+        assert!(copied_so.exists(), "native .so was not copied");
+        assert_eq!(std::fs::read(&copied_so).unwrap(), so_bytes, ".so bytes differ");
+        // The dist-info METADATA travelled along too.
+        assert!(store_dir
+            .join("pydantic_core-2.0.0.dist-info")
+            .join("METADATA")
+            .exists());
+    }
+
+    /// RECORD paths that escape site-packages (console scripts) are not copied.
+    #[test]
+    fn copy_installed_python_dist_skips_escaping_record_paths() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let site = tmp.path().join("site-packages");
+        let pkg = site.join("widget");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("__init__.py"), b"x").unwrap();
+        let dist_info = site.join("widget-1.0.dist-info");
+        std::fs::create_dir_all(&dist_info).unwrap();
+        std::fs::write(dist_info.join("METADATA"), "Name: widget\nVersion: 1.0\n").unwrap();
+        std::fs::write(
+            dist_info.join("RECORD"),
+            "widget/__init__.py,,\n../../Scripts/widget.exe,,\n",
+        )
+        .unwrap();
+
+        let store_dir = tmp.path().join("store_entry");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        copy_installed_python_dist(&site, &dist_info, "widget", &store_dir).unwrap();
+
+        assert!(store_dir.join("widget").join("__init__.py").exists());
+        // The escaping path must NOT have created anything outside store_dir.
+        assert!(!store_dir.join("..").join("..").join("Scripts").join("widget.exe").exists());
+    }
+
+    /// Falling back to dist-info+package copy when RECORD is absent still
+    /// brings the package contents.
+    #[test]
+    fn copy_installed_python_dist_without_record_falls_back() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let site = tmp.path().join("site-packages");
+        let pkg = site.join("my_pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("mod.py"), b"code").unwrap();
+        let dist_info = site.join("my_pkg-3.0.dist-info");
+        std::fs::create_dir_all(&dist_info).unwrap();
+        std::fs::write(dist_info.join("METADATA"), "Name: my-pkg\nVersion: 3.0\n").unwrap();
+        // No RECORD on purpose.
+
+        let store_dir = tmp.path().join("store_entry");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        copy_installed_python_dist(&site, &dist_info, "my-pkg", &store_dir).unwrap();
+
+        assert!(store_dir.join("my_pkg").join("mod.py").exists());
+        assert!(store_dir.join("my_pkg-3.0.dist-info").join("METADATA").exists());
+    }
+
+    #[test]
+    fn discover_venvs_finds_nonstandard_name_by_pyvenv_cfg() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // CRM-style: the env dir is "venv", not ".venv".
+        let venv = tmp.path().join("venv");
+        std::fs::create_dir_all(&venv).unwrap();
+        std::fs::write(venv.join("pyvenv.cfg"), "version = 3.10.4\n").unwrap();
+        // A decoy dir without pyvenv.cfg must be ignored.
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+
+        let found = discover_venvs(tmp.path());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0], venv);
+    }
 }

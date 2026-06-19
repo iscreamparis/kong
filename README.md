@@ -316,9 +316,15 @@ kong import            # moves packages to the global store, replaces with symli
 ```
 
 What happens:
-1. Scans existing `.venv` and `node_modules` and copies packages into the store
+1. **Adopts** the already-installed environment: finds the project's virtualenv
+   (any dir with a `pyvenv.cfg` — `.venv`, `venv`, `env`, …) and `node_modules`,
+   and copies each installed distribution into the store **byte-for-byte**,
+   including native extensions (`.so` / `.pyd` / `.node`). `kong.rules` is built
+   from the installed set — packages are **never re-resolved or re-downloaded**.
+   (Only an ecosystem with *no* installed env falls back to the resolver so a
+   genuinely-missing dep can still be fetched.)
 2. Removes the local directories
-3. Runs `kong rules` + `kong use` to recreate them as symlinks into the store
+3. Recreates them as symlinks into the store (like `kong use`)
 
 Your project keeps working exactly as before — but now shares packages with all your other projects.
 
