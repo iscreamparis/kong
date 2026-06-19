@@ -617,11 +617,15 @@ pub fn ensure_bottles_in_store(
     brew: &crate::config::BrewSection,
     store: &std::path::Path,
 ) -> Result<()> {
-    if !cfg!(target_os = "macos") && !cfg!(target_os = "linux") {
+    // Homebrew is a macOS-only path in KONG. On Linux, system dependencies come
+    // from the distro package manager (apt) — KONG does not manage them yet, so
+    // a Brewfile warns-and-skips rather than breaking the run.
+    if !cfg!(target_os = "macos") {
         warn!(
             count = brew.packages.len(),
             os = std::env::consts::OS,
-            "Skipping Homebrew bottles: only supported on macOS/Linux"
+            "Skipping Homebrew bottles: managed only on macOS. \
+             On Linux, install these system dependencies via apt instead."
         );
         return Ok(());
     }

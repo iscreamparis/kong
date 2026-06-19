@@ -335,7 +335,17 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
 
     // ── Brew ────────────────────────────────────────────────────────────────
     let brew_deps = crate::brew::parser::detect_and_parse(project_dir)?;
-    let brew_section = if !brew_deps.is_empty() {
+    // Homebrew is a macOS-only path. On Linux a Brewfile warns-and-skips: system
+    // dependencies are expected to come from apt, not KONG.
+    let brew_section = if !brew_deps.is_empty() && !cfg!(target_os = "macos") {
+        tracing::warn!(
+            count = brew_deps.len(),
+            os = std::env::consts::OS,
+            "Brewfile detected but Homebrew is managed only on macOS — skipping. \
+             Install these system dependencies via apt on Linux."
+        );
+        None
+    } else if !brew_deps.is_empty() {
         info!(count = brew_deps.len(), "Found Brewfile dependencies");
         let mut packages = Vec::new();
 
