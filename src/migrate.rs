@@ -474,6 +474,15 @@ pub fn solidify_project(project_dir: &Path) -> Result<()> {
 }
 
 /// Create a real (non-linked) .venv by copying packages from the store.
+///
+/// A solidified venv must be **truly standalone** — i.e. survive the store
+/// being deleted. So besides copying site-packages, we also copy the
+/// python-build-standalone runtime into the project (`.venv/runtime/`) and
+/// repoint `bin/python`(`Scripts\python.exe`) + `pyvenv.cfg home` at that
+/// local copy. python-build-standalone runtimes are relocatable, so a
+/// `python -c "import sys; print(sys.executable)"` then resolves entirely
+/// inside the project with the store gone. We also (re)generate
+/// `[console_scripts]` launchers pointing at the local python.
 fn solidify_python(
     venv_dir: &Path,
     python: &config::PythonSection,
@@ -493,9 +502,16 @@ fn solidify_python(
     };
     std::fs::create_dir_all(&site_packages)?;
 
-    // pyvenv.cfg
-    let kong_python = kong_python_exe(store_root, rules);
-    let python_home = kong_python
+    // ── Localize the runtime: copy it into the project so bin/python no longer
+    //    points into the (deletable) store. ──────────────────────────────────
+    let local_runtime = venv_dir.join("runtime");
+    let local_python = localize_runtime(store_root, rules, &local_runtime)?;
+    if local_python.is_none() {
+        warn!("kong python runtime not found in store; solidified .venv will not be standalone");
+    }
+
+    // pyvenv.cfg `home` → the LOCAL runtime's bin dir (store-independent).
+    let python_home = local_python
         .as_ref()
         .and_then(|e| e.parent())
         .map(|p| p.to_string_lossy().into_owned())
@@ -508,17 +524,21 @@ fn solidify_python(
         ),
     )?;
 
-    // bin/Scripts with python executable
+    // bin/Scripts with python executable → point at the LOCAL runtime.
     #[cfg(not(windows))]
     {
         let bin = venv_dir.join("bin");
         std::fs::create_dir_all(&bin)?;
-        if let Some(ref src_exe) = kong_python {
+        if let Some(ref src_exe) = local_python {
             for name in &["python3", "python"] {
                 let dst = bin.join(name);
-                if !dst.exists() {
-                    std::os::unix::fs::symlink(src_exe, &dst)?;
+                if dst.exists() || dst.is_symlink() {
+                    std::fs::remove_file(&dst).ok();
                 }
+                // Relative symlink into the project's own runtime/ — so the
+                // link target moves with the project and never touches the store.
+                let rel = pathdiff_relative(&dst, src_exe).unwrap_or_else(|| src_exe.clone());
+                std::os::unix::fs::symlink(&rel, &dst)?;
             }
         }
     }
@@ -526,8 +546,12 @@ fn solidify_python(
     {
         let scripts = venv_dir.join("Scripts");
         std::fs::create_dir_all(&scripts)?;
-        if let Some(ref src_exe) = kong_python {
+        if let Some(ref src_exe) = local_python {
             let _ = std::fs::copy(src_exe, scripts.join("python.exe"));
+            let src_w = src_exe.with_file_name("pythonw.exe");
+            if src_w.exists() {
+                let _ = std::fs::copy(&src_w, scripts.join("pythonw.exe"));
+            }
         }
     }
 
@@ -542,7 +566,114 @@ fn solidify_python(
         debug!(pkg = %pkg.name, "Copied into .venv");
     }
 
+    // Generate [console_scripts] launchers pointing at the venv's local python.
+    {
+        #[cfg(windows)]
+        let (bin_dir, venv_python) =
+            (venv_dir.join("Scripts"), venv_dir.join("Scripts").join("python.exe"));
+        #[cfg(not(windows))]
+        let (bin_dir, venv_python) =
+            (venv_dir.join("bin"), venv_dir.join("bin").join("python"));
+        let n = crate::python::entry_points::generate_console_scripts(
+            &site_packages,
+            &bin_dir,
+            &venv_python,
+        )?;
+        if n > 0 {
+            info!(count = n, "  ✓ Generated {n} console-script launcher(s)");
+        }
+    }
+
+    info!("  ✓ Runtime copied locally (.venv/runtime) — standalone, +runtime-size disk cost");
     Ok(())
+}
+
+/// Copy the kong-managed python-build-standalone runtime from the store into
+/// `local_runtime`, and return the path to the LOCAL python executable inside
+/// it. python-build-standalone is relocatable, so the copy runs standalone.
+/// Returns `Ok(None)` when no runtime is recorded / found in the store.
+fn localize_runtime(
+    store_root: &Path,
+    rules: &KongRules,
+    local_runtime: &Path,
+) -> Result<Option<PathBuf>> {
+    let store_exe = match kong_python_exe(store_root, rules) {
+        Some(e) => e,
+        None => return Ok(None),
+    };
+    // The store runtime base dir = rules.runtimes.python.store_path.
+    let rt = rules
+        .runtimes
+        .as_ref()
+        .and_then(|r| r.python.as_ref())
+        .map(|p| store_root.join(&p.store_path));
+    let store_base = match rt {
+        Some(b) if b.is_dir() => b,
+        // Fallback: the runtime base is an ancestor of the exe.
+        _ => store_exe
+            .ancestors()
+            .find(|a| python_exe_in_runtime(a).is_some())
+            .map(|a| a.to_path_buf())
+            .unwrap_or_else(|| store_exe.clone()),
+    };
+
+    if local_runtime.exists() {
+        link::remove_dir_all_robust(local_runtime).ok();
+    }
+    copy_dir_recursive(&store_base, local_runtime)?;
+
+    // Recompute the exe path inside the LOCAL copy by mirroring its relative
+    // position from the store base.
+    let rel_exe = store_exe
+        .strip_prefix(&store_base)
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|_| {
+            // store_exe wasn't under store_base (unexpected) — probe the copy.
+            python_exe_in_runtime(local_runtime)
+                .and_then(|e| e.strip_prefix(local_runtime).ok().map(|p| p.to_path_buf()))
+                .unwrap_or_else(|| PathBuf::from("bin/python3"))
+        });
+    Ok(Some(local_runtime.join(rel_exe)))
+}
+
+/// Find python.exe / python3 inside a runtime dir (flat or nested `python/`).
+fn python_exe_in_runtime(base: &Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    let candidates = ["python.exe", "python/python.exe"];
+    #[cfg(not(windows))]
+    let candidates = ["bin/python3", "bin/python", "python/bin/python3"];
+    for rel in &candidates {
+        let p = base.join(rel);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Compute a relative path FROM the directory containing `link` TO `target`.
+/// Minimal pure-std implementation (avoids a new dependency).
+#[cfg(not(windows))]
+fn pathdiff_relative(link: &Path, target: &Path) -> Option<PathBuf> {
+    let base = link.parent()?;
+    let base_c: Vec<_> = base.components().collect();
+    let tgt_c: Vec<_> = target.components().collect();
+    let mut i = 0;
+    while i < base_c.len() && i < tgt_c.len() && base_c[i] == tgt_c[i] {
+        i += 1;
+    }
+    let mut rel = PathBuf::new();
+    for _ in i..base_c.len() {
+        rel.push("..");
+    }
+    for c in &tgt_c[i..] {
+        rel.push(c.as_os_str());
+    }
+    if rel.as_os_str().is_empty() {
+        None
+    } else {
+        Some(rel)
+    }
 }
 
 /// Create a real (non-linked) node_modules by copying packages from the store.
@@ -1023,6 +1154,63 @@ mod tests {
             .join("pydantic_core-2.0.0.dist-info")
             .join("METADATA")
             .exists());
+    }
+
+    /// `localize_runtime` copies a (fake) store runtime into the project and
+    /// returns a python exe path INSIDE the project — never pointing at the
+    /// store. After the store dir is deleted, the local exe must still exist.
+    #[test]
+    fn localize_runtime_copies_into_project_and_is_store_independent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store_root = tmp.path().join("store");
+        // Fake python-build-standalone runtime in the store.
+        let rt_rel = "python/runtime/3.12.9";
+        let rt_base = store_root.join(rt_rel);
+        #[cfg(windows)]
+        let exe_rel = "python.exe";
+        #[cfg(not(windows))]
+        let exe_rel = "bin/python3";
+        let store_exe = rt_base.join(exe_rel);
+        std::fs::create_dir_all(store_exe.parent().unwrap()).unwrap();
+        std::fs::write(&store_exe, b"#!/fake/python\n").unwrap();
+        // A sibling file to prove the whole runtime tree is copied.
+        std::fs::write(rt_base.join("LICENSE"), b"license").unwrap();
+
+        let rules = KongRules {
+            version: 1,
+            project: "p".into(),
+            generated: "now".into(),
+            runtimes: Some(config::RuntimeSection {
+                python: Some(config::RuntimeEntry {
+                    version: "3.12.9".into(),
+                    store_path: rt_rel.into(),
+                }),
+                node: None,
+                rust: None,
+            }),
+            python: None,
+            node: None,
+            rust: None,
+            brew: None,
+            scripts: Default::default(),
+            services: Vec::new(),
+        };
+
+        let project = tmp.path().join("proj");
+        let local_runtime = project.join(".venv").join("runtime");
+        let local_exe = localize_runtime(&store_root, &rules, &local_runtime)
+            .unwrap()
+            .expect("should return a local python exe");
+
+        // The returned exe is inside the PROJECT, not the store.
+        assert!(local_exe.starts_with(&project), "exe not in project: {}", local_exe.display());
+        assert!(!local_exe.starts_with(&store_root), "exe still in store: {}", local_exe.display());
+        assert!(local_exe.exists(), "local exe missing");
+        assert!(local_runtime.join("LICENSE").exists(), "runtime tree not fully copied");
+
+        // Delete the store entirely — the local runtime must survive.
+        link::remove_dir_all_robust(&store_root).unwrap();
+        assert!(local_exe.exists(), "local exe vanished after store removal — not standalone");
     }
 
     /// RECORD paths that escape site-packages (console scripts) are not copied.

@@ -87,6 +87,26 @@ pub fn build_venv(project_dir: &Path, python: &PythonSection, store_root: &Path,
         debug!(pkg = %pkg.name, "Linked into site-packages");
     }
 
+    // ── Generate [console_scripts] launchers (uvicorn, alembic, pip, …) ───────
+    //    pip/venv create these; kong didn't, so ExecStart=.venv/bin/uvicorn
+    //    failed 203/EXEC. Driven entirely by each dist-info's entry_points.txt.
+    //    Shebang points at this venv's own python (a store-linked symlink for
+    //    `use` — which is fine).
+    {
+        #[cfg(windows)]
+        let (bin_dir, venv_python) = (venv.join("Scripts"), venv.join("Scripts").join("python.exe"));
+        #[cfg(not(windows))]
+        let (bin_dir, venv_python) = (venv.join("bin"), venv.join("bin").join("python"));
+        let n = crate::python::entry_points::generate_console_scripts(
+            &site_packages,
+            &bin_dir,
+            &venv_python,
+        )?;
+        if n > 0 {
+            debug!(count = n, "Generated console-script launchers");
+        }
+    }
+
     info!("Python .venv ready at {}", venv.display());
     Ok(())
 }
