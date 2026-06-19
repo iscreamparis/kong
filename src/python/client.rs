@@ -93,13 +93,32 @@ pub fn fetch_and_download(name: &str, version: &str, target_py_tag: &str, store_
         Some(&file.digests.sha256),
     )?;
 
-    // Extract to store
-    crate::extract::extract(&result.path, store_path)?;
+    // The raw PyPI Requires-Dist list — needed both to compute transitive deps
+    // and (for the sdist path) to persist into a synthesized dist-info so a later
+    // cache hit can re-derive them from the store.
+    let requires_dist = info.info.requires_dist.clone().unwrap_or_default();
+
+    // Lay the package out in the store. A WHEEL already carries an importable
+    // site-packages tree → plain extract. An SDIST extracts as
+    // `{name}-{version}/…` (modules one level down, NOT importable at the store
+    // root), so it gets a dedicated pure-Python install that lifts the modules
+    // to the store root and synthesizes a dist-info — matching the wheel layout.
+    if is_sdist(file) {
+        crate::python::sdist::install_sdist(
+            &result.path,
+            store_path,
+            name,
+            version,
+            &requires_dist,
+        )?;
+    } else {
+        crate::extract::extract(&result.path, store_path)?;
+    }
     crate::store::write_verified_marker(store_path, &result.hash)?;
 
     // Collect transitive deps from PyPI info.requires_dist (more reliable than
     // reading the extracted METADATA file — same data, no filesystem walk).
-    let transitive = parse_requires_dist(info.info.requires_dist.as_deref().unwrap_or(&[]));
+    let transitive = parse_requires_dist(&requires_dist);
 
     Ok((FileInfo {
         hash: result.hash,
@@ -242,6 +261,23 @@ fn parse_requires_dist(entries: &[String]) -> Vec<TransitiveDep> {
 fn extract_exact_pin(spec: &str) -> Option<String> {
     let set = crate::python::pep440::SpecifierSet::parse(spec);
     set.exact_pin()
+}
+
+/// Is the selected PyPI file a source distribution (sdist) rather than a wheel?
+///
+/// Primary signal is the PyPI `packagetype` field (`"sdist"` vs `"bdist_wheel"`);
+/// we also fall back to the filename extension so a feed that omits/garbles
+/// `packagetype` still routes correctly: a `.whl` is a wheel, anything else
+/// kong knows how to fetch here (`.tar.gz` / `.zip` / `.tgz`) is an sdist.
+fn is_sdist(file: &PypiFileEntry) -> bool {
+    if file.packagetype == "sdist" {
+        return true;
+    }
+    if file.packagetype == "bdist_wheel" {
+        return false;
+    }
+    let lower = file.filename.to_lowercase();
+    !lower.ends_with(".whl")
 }
 
 /// Select the best file for the target interpreter.
@@ -603,6 +639,23 @@ mod tests {
 
     fn target(tag: &str) -> TargetTag {
         TargetTag::parse(tag)
+    }
+
+    // ── sdist vs wheel detection ─────────────────────────────────────────────
+    #[test]
+    fn detects_sdist_vs_wheel() {
+        // packagetype-driven
+        assert!(is_sdist(&sdist("feedparser-6.0.0.tar.gz")));
+        assert!(!is_sdist(&entry("feedparser-6.0.0-py3-none-any.whl")));
+        // filename fallback when packagetype is missing/garbled
+        let mut blank = entry("sgmllib3k-1.0.0.tar.gz");
+        blank.packagetype = String::new();
+        assert!(is_sdist(&blank), "no packagetype + .tar.gz → sdist");
+        let mut blank_whl = entry("foo-1.0-py3-none-any.whl");
+        blank_whl.packagetype = String::new();
+        assert!(!is_sdist(&blank_whl), "no packagetype + .whl → wheel");
+        // a .zip sdist (PyPI publishes some legacy sdists as .zip)
+        assert!(is_sdist(&sdist("legacy-0.1.zip")));
     }
 
     // ── The bug: cp313t must NEVER be chosen for a cp310 runtime ─────────────
