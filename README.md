@@ -387,7 +387,8 @@ No pip. No npm. No brew. No conda. No rustup. Just KONG.
 - [x] **macOS / Apple Silicon support** — symlinks instead of NTFS junctions, platform-aware store path, arm64 wheel selection
 - [x] **Node.js bin scripts** — link CLI tools into `node_modules/.bin/` so `vite`, `tsc`, `eslint` etc. work via `kong run`
 - [x] **Architecture-aware wheel selection** — correctly pick arm64 wheels on Apple Silicon (any compatible macOS version)
-- [ ] **Proper wheel selection** — full PEP 427 filename parsing; check `requires_python`
+- [x] **Proper wheel selection** — full PEP 427 filename parsing; pick the wheel matching the target interpreter's CPython/ABI tag
+- [ ] **Check `requires_python`** — honor a wheel's `requires_python` metadata when selecting
 - [ ] **Transitive dependency cycle detection** — prevent `kong rules` from hanging on circular deps
 - [ ] **Download retry** — retry failed downloads before giving up
 
@@ -429,12 +430,16 @@ No pip. No npm. No brew. No conda. No rustup. Just KONG.
 - [x] **Single-instance GUI** — `flock()` prevents multiple GUI windows from opening simultaneously.
 - [x] **`ca-certificates` bottle fix** — platform-independent (`all`) bottles now resolved correctly.
 
-### v0.8 — Performance ← **current**
+### v0.8 — Linux GA + migration hardening ← **current**
+- [x] **Linux release** — static musl binary built + attached by CI on every `vX.Y.Z` tag
+- [x] **Wheel selection by target CPython/ABI tag** — picks the exact `cpXY` / `abi3` / `none` wheel for the managed interpreter and rejects a wrong CPython minor (e.g. won't pick a `cp313t` wheel for a `cp310` runtime)
+- [x] **`kong import` copy-adopts installed packages** — copies the existing `.venv` / `node_modules` into the store byte-for-byte (native extensions included), with no re-download or re-resolve
+- [x] **Robust import copy** — handles venv internals such as directory symlinks (`lib64 -> lib`) and dangling links
+
+### v0.9 — Performance + broader compatibility
 - [ ] **Parallel downloads** — all packages fetched concurrently (currently sequential)
 - [ ] **Progress bars** — `indicatif` integration for long downloads
 - [ ] **Resume on failure** — partial downloads restart from where they stopped
-
-### v0.9 — Broader compatibility
 - [ ] **Python resolver** — resolve `>=` version constraints without a lockfile
 - [ ] **`kong shell`** — drop into an activated shell for a project
 - [ ] **`kong add <pkg>`** — add a package and update `kong.rules` in one step
@@ -478,7 +483,6 @@ KONG is early-stage software. Here's what doesn't work yet — no surprises.
 
 ### Python
 - **No sdist compilation.** KONG downloads pre-built wheels only. If a package has no wheel for your platform (rare for popular packages, common for niche ones), it will download the source tarball but won't compile C extensions. Packages like `numpy`, `flask`, `requests` ship wheels and work fine.
-- **Loose wheel selection.** Platform tag matching uses substring search — it may pick a wheel for the wrong Python minor version on edge cases.
 - **`requires_python` not checked.** A package requiring Python 3.11+ will be selected even if KONG manages Python 3.10.
 - **Version ranges not resolved.** `>=1.0` or `~=2.3` in `requirements.txt` are skipped — only exact pins (`==`) and lockfile versions are handled. Use a lockfile for reliable results.
 
