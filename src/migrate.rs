@@ -148,10 +148,14 @@ fn generate_rules_skipping(
             continue;
         }
         let dst = shadow.path().join(&name);
-        if entry.path().is_dir() {
+        // Classify by lstat: a real directory recurses; a symlink (even one to
+        // a directory, e.g. a stray `lib64`) is recreated, not walked; a
+        // regular file is copied.
+        let meta = std::fs::symlink_metadata(entry.path())?;
+        if meta.is_dir() {
             copy_dir_recursive(&entry.path(), &dst)?;
         } else {
-            std::fs::copy(entry.path(), &dst)?;
+            copy_entry(&entry.path(), &dst)?;
         }
     }
 
@@ -328,18 +332,12 @@ fn copy_installed_python_dist(
         }
         let src = site_packages.join(rel_path);
         let dst = store_dir.join(rel_path);
-        if !src.exists() {
-            continue;
+        // Use lstat (via copy_entry): a RECORD entry may be a symlink, and we
+        // must not follow it into a "neither file nor symlink-to-file" error.
+        if std::fs::symlink_metadata(&src).is_err() {
+            continue; // RECORD lists a file that isn't there — skip.
         }
-        if src.is_dir() {
-            std::fs::create_dir_all(&dst)?;
-        } else {
-            if let Some(parent) = dst.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::copy(&src, &dst)
-                .with_context(|| format!("failed to copy {}", src.display()))?;
-        }
+        copy_entry(&src, &dst)?;
     }
     Ok(())
 }
@@ -837,25 +835,106 @@ fn copy_dist_info_and_package(
     Ok(())
 }
 
-/// Recursively copy a directory tree.
+/// Recursively copy a directory tree, robustly handling every entry kind a real
+/// venv / site-packages / node_modules tree contains.
+///
+/// `WalkDir` does NOT follow symlinks by default, so a symlink (whatever its
+/// target) is yielded as a leaf and we recreate it verbatim — we never descend
+/// through it (no infinite loop on a self-referential link like `lib64 -> lib`).
+/// Each entry is classified by `symlink_metadata` (lstat) so a symlink is
+/// detected BEFORE its target is followed.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in WalkDir::new(src).min_depth(1) {
         let entry = entry?;
         let rel = entry.path().strip_prefix(src)?;
         let dst_path = dst.join(rel);
-
-        if entry.file_type().is_dir() {
-            std::fs::create_dir_all(&dst_path)?;
-        } else if !dst_path.exists() {
-            if let Some(parent) = dst_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::copy(entry.path(), &dst_path)
-                .with_context(|| format!("failed to copy {}", entry.path().display()))?;
-        }
+        copy_entry(entry.path(), &dst_path)?;
     }
     Ok(())
+}
+
+/// Copy a single filesystem entry from `src` to `dst`, classifying it by lstat
+/// (`symlink_metadata`) so symlinks are detected before their target is
+/// followed.  Handles: directories (created), symlinks of any kind (recreated
+/// as a symlink to the same target — dir or file), broken/dangling symlinks
+/// (skipped with a debug log), and regular files (byte-for-byte copy).
+///
+/// Idempotent: an entry that already exists at `dst` is left untouched.
+fn copy_entry(src: &Path, dst: &Path) -> Result<()> {
+    // lstat: does NOT follow the link, so a symlink reports as a symlink.
+    let meta = match std::fs::symlink_metadata(src) {
+        Ok(m) => m,
+        // Race / vanished entry — nothing to copy.
+        Err(_) => return Ok(()),
+    };
+
+    if meta.file_type().is_symlink() {
+        // A symlink of ANY kind (to a dir like `lib64 -> lib`, to a file, or
+        // dangling). Recreate it verbatim rather than copying its target.
+        if dst.symlink_metadata().is_ok() {
+            return Ok(()); // already present (idempotent re-import)
+        }
+        let target = match std::fs::read_link(src) {
+            Ok(t) => t,
+            Err(e) => {
+                debug!(path = %src.display(), err = %e, "Unreadable symlink, skipping");
+                return Ok(());
+            }
+        };
+        // Dangling/broken symlink: keep going (don't abort the whole import).
+        // We recreate it anyway so the tree stays faithful, but a recreate
+        // failure on a dangling link is non-fatal.
+        let points_to_dir = std::fs::metadata(src).map(|m| m.is_dir()).unwrap_or(false);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match symlink_any(&target, dst, points_to_dir) {
+            Ok(()) => {}
+            Err(e) => {
+                debug!(
+                    path = %src.display(),
+                    target = %target.display(),
+                    err = %e,
+                    "Could not recreate symlink (likely dangling/unsupported), skipping"
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    if meta.is_dir() {
+        std::fs::create_dir_all(dst)?;
+        return Ok(());
+    }
+
+    // Regular file (incl. native .so/.pyd/.node) — byte-for-byte.
+    if dst.exists() {
+        return Ok(()); // idempotent
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(src, dst)
+        .with_context(|| format!("failed to copy {}", src.display()))?;
+    Ok(())
+}
+
+/// Create a symlink at `dst` pointing at `target`. On Unix a single syscall
+/// handles both file and dir targets; on Windows the kind matters, so we pick
+/// `symlink_dir` / `symlink_file` from whether the target resolves to a dir.
+#[cfg(unix)]
+fn symlink_any(target: &Path, dst: &Path, _points_to_dir: bool) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, dst)
+}
+
+#[cfg(windows)]
+fn symlink_any(target: &Path, dst: &Path, points_to_dir: bool) -> std::io::Result<()> {
+    if points_to_dir {
+        std::os::windows::fs::symlink_dir(target, dst)
+    } else {
+        std::os::windows::fs::symlink_file(target, dst)
+    }
 }
 
 /// Convert "3.12.9" → "cp312"
@@ -1007,5 +1086,84 @@ mod tests {
         let found = discover_venvs(tmp.path());
         assert_eq!(found.len(), 1);
         assert_eq!(found[0], venv);
+    }
+
+    /// Create a symlink for the test, returning false if the host can't make
+    /// one (Windows without Developer Mode). On Unix this always succeeds.
+    #[cfg(unix)]
+    fn try_symlink(target: &Path, link: &Path, _is_dir: bool) -> bool {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+    #[cfg(windows)]
+    fn try_symlink(target: &Path, link: &Path, is_dir: bool) -> bool {
+        if is_dir {
+            std::os::windows::fs::symlink_dir(target, link).is_ok()
+        } else {
+            std::os::windows::fs::symlink_file(target, link).is_ok()
+        }
+    }
+
+    /// `copy_dir_recursive` must reproduce a real venv tree: regular files and a
+    /// native `.so` byte-for-byte, a `lib64 -> lib` DIRECTORY symlink recreated
+    /// as a symlink (not copied as a file, not infinite-looped), a
+    /// symlink-to-file recreated, and a dangling symlink that does NOT abort the
+    /// whole copy.
+    #[test]
+    fn copy_dir_recursive_handles_dir_symlinks_and_dangling() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("venv");
+        let lib = src.join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+
+        // Regular text file.
+        std::fs::write(src.join("pyvenv.cfg"), b"version = 3.10.4\n").unwrap();
+        // Native extension — bytes must be preserved exactly.
+        let so_bytes: &[u8] = &[0x7f, b'E', b'L', b'F', 9, 8, 7, 6];
+        std::fs::write(lib.join("_native.so"), so_bytes).unwrap();
+        // A nested subdir with a file (recursion).
+        std::fs::write(lib.join("module.py"), b"print(1)").unwrap();
+
+        // `lib64 -> lib` directory symlink (relative target, points back inside
+        // the tree — must not infinite-loop).
+        let dir_symlink_made = try_symlink(Path::new("lib"), &src.join("lib64"), true);
+        // symlink-to-file: `cfg-alias -> pyvenv.cfg`.
+        let file_symlink_made = try_symlink(Path::new("pyvenv.cfg"), &src.join("cfg-alias"), false);
+        // Dangling symlink: target does not exist.
+        let dangling_made = try_symlink(Path::new("does-not-exist"), &src.join("dangling"), false);
+
+        let dst = tmp.path().join("copy");
+        // The whole copy must succeed even with the dangling link present.
+        copy_dir_recursive(&src, &dst).expect("copy_dir_recursive must not abort");
+
+        // Regular file + native .so copied byte-identical.
+        assert_eq!(std::fs::read(dst.join("pyvenv.cfg")).unwrap(), b"version = 3.10.4\n");
+        let copied_so = dst.join("lib").join("_native.so");
+        assert!(copied_so.exists(), "native .so missing");
+        assert_eq!(std::fs::read(&copied_so).unwrap(), so_bytes, ".so bytes differ");
+        assert!(dst.join("lib").join("module.py").exists());
+
+        if dir_symlink_made {
+            let copied_lib64 = dst.join("lib64");
+            let lmeta = std::fs::symlink_metadata(&copied_lib64)
+                .expect("lib64 should exist in the copy");
+            assert!(
+                lmeta.file_type().is_symlink(),
+                "lib64 must be recreated as a symlink, not copied as a dir/file"
+            );
+            // It still resolves to the directory it pointed at.
+            assert_eq!(std::fs::read_link(&copied_lib64).unwrap(), Path::new("lib"));
+        }
+        if file_symlink_made {
+            let alias = dst.join("cfg-alias");
+            assert!(
+                std::fs::symlink_metadata(&alias).unwrap().file_type().is_symlink(),
+                "cfg-alias must be a symlink in the copy"
+            );
+        }
+        if dangling_made {
+            // The dangling link was either recreated (as a still-dangling link)
+            // or cleanly skipped; either way the copy did not error above.
+            // Nothing more to assert beyond the copy having succeeded.
+        }
     }
 }
