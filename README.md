@@ -51,9 +51,25 @@ The store lives at `~/Library/Application Support/kong/`. On macOS, KONG uses sy
 
 ### Linux
 
-Build from source (a prebuilt release is on the roadmap). KONG on Linux is a
-**CLI-only** build — the optional Slint GUI is disabled so you don't need
-`fontconfig` / X11 / OpenGL system libraries:
+Download **[Kong-0.7.0-linux-x64.tar.gz](https://github.com/iscreamparis/kong/releases/download/v0.7.0/Kong-0.7.0-linux-x64.tar.gz)** from the [Releases page](https://github.com/iscreamparis/kong/releases), extract it, and put `kong` on your PATH:
+
+```bash
+curl -fsSL -o Kong-0.7.0-linux-x64.tar.gz \
+  https://github.com/iscreamparis/kong/releases/download/v0.7.0/Kong-0.7.0-linux-x64.tar.gz
+tar -xzf Kong-0.7.0-linux-x64.tar.gz
+chmod +x kong
+mkdir -p ~/.local/bin && mv kong ~/.local/bin/   # ensure ~/.local/bin is on $PATH
+kong --version
+```
+
+The Linux release is a **statically linked musl binary** (`file kong` shows
+`statically linked`) — no glibc-version dependency, so it runs on assorted /
+older Ubuntu VMs with nothing else installed. It's a **CLI-only** build: the
+optional Slint GUI is disabled, so you don't need `fontconfig` / X11 / OpenGL
+system libraries either.
+
+<details>
+<summary>Build from source</summary>
 
 ```bash
 git clone https://github.com/iscreamparis/kong
@@ -61,6 +77,17 @@ cd kong
 cargo build --release --no-default-features   # CLI only, no GUI
 cp target/release/kong ~/.local/bin/
 ```
+
+For a portable static build, target musl (matches the released binary):
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+sudo apt-get install -y musl-tools
+cargo build --release --no-default-features --target x86_64-unknown-linux-musl
+cp target/x86_64-unknown-linux-musl/release/kong ~/.local/bin/
+```
+
+</details>
 
 The store lives at `~/.local/share/kong/` (XDG data dir; respects
 `$XDG_DATA_HOME`). Linux uses symlinks + hard links — same as macOS, no
@@ -423,7 +450,7 @@ No pip. No npm. No brew. No conda. No rustup. Just KONG.
 
 ### v1.0 — Production
 - [x] **macOS support** — symlinks, platform-specific selection, GHCR bottles
-- [x] **Linux support** — CLI-only build (Slint GUI gated behind an optional `gui` Cargo feature so no fontconfig/X11/OpenGL needed), XDG store path (`~/.local/share/kong`), symlinks + hard links, manylinux wheel selection, linux Node/Rust/Python runtime downloads, exec-bit `.bin/` shims; `Brewfile` warns-and-skips (apt manages system deps). Smoke-tested end-to-end on Ubuntu/WSL against real Python + Node manifests. CI pipeline for cross-platform release builds still pending.
+- [x] **Linux support** — CLI-only build (Slint GUI gated behind an optional `gui` Cargo feature so no fontconfig/X11/OpenGL needed), XDG store path (`~/.local/share/kong`), symlinks + hard links, manylinux wheel selection, linux Node/Rust/Python runtime downloads, exec-bit `.bin/` shims; `Brewfile` warns-and-skips (apt manages system deps). Smoke-tested end-to-end on Ubuntu/WSL against real Python + Node manifests. **Prebuilt Linux release** — a static musl binary (`Kong-<version>-linux-x64.tar.gz`) is built + attached by CI (`.github/workflows/release-linux.yml`) on every `vX.Y.Z` tag, alongside the Windows installer and macOS DMG.
 - [ ] Private registry support (PyPI, npm, crates.io)
 - [ ] Windows installer with proper PATH management (NSIS → WiX)
 - [ ] `kong doctor` full report with auto-fix suggestions
