@@ -124,6 +124,15 @@ Windows primary: junctions + hard links + \\?\ long paths.
 macOS/Linux: symlinks + hard links.
 Detect current Python version, platform tags, Node version, Rust target automatically.
 
+Linux: CLI-only build. The native Slint GUI is gated behind an optional `gui`
+Cargo feature (on by default for Windows/macOS); build headless Linux with
+`cargo build --release --no-default-features` to avoid the fontconfig/X11/OpenGL
+system-lib requirement. Store path = `~/.local/share/kong` (XDG). Platform-
+specific code is cfg-gated: `#[cfg(windows)]` for junctions/.cmd shims/long
+paths, `#[cfg(unix)]` for symlinks/exec-bit `.bin` scripts, `#[cfg(target_os =
+"macos")]` for Homebrew + Mach-O fixup. Homebrew is macOS-only — a `Brewfile`
+on Linux warns-and-skips (system deps come from apt).
+
 10. Development Plan
 
 Project skeleton + CLI + config
