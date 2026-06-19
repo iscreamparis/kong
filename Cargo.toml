@@ -9,6 +9,15 @@ license = "MIT OR Apache-2.0"
 name = "kong"
 path = "src/main.rs"
 
+[features]
+# The native GUI (`kong gui`) depends on Slint, which pulls in heavy system
+# libraries (fontconfig, X11/Wayland, OpenGL) on Linux.  It is enabled by
+# default for desktop platforms (Windows / macOS), but can be disabled with
+# `--no-default-features` to build a pure CLI binary on headless Linux servers
+# that don't have those libraries installed.
+default = ["gui"]
+gui = ["dep:slint", "dep:slint-build"]
+
 [dependencies]
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -50,8 +59,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Progress bars
 indicatif = "0.17"
 
-# GUI
-slint = "1.15"
+# GUI (optional — see [features].gui)
+slint = { version = "1.15", optional = true }
 
 # Temp directories for downloads
 tempfile = "3"
@@ -65,4 +74,4 @@ libc = "0.2"
 junction = "1"
 
 [build-dependencies]
-slint-build = "1.15"
+slint-build = { version = "1.15", optional = true }

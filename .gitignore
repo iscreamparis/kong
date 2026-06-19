@@ -16,11 +16,14 @@ Thumbs.db
 *.user
 
 
-.github/
+# Ignore local .github notes/instructions, but keep CI workflows tracked.
+.github/*
+!.github/workflows/
+!.github/workflows/**
 
 # Test artifacts
 /test/
 
 # Local notes
-agents.mdkong.rules
+agents.md
 kong.rules

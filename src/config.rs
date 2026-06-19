@@ -177,7 +177,7 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
             let full_store_path = store_root.join(&store_path);
             let transitive = if !full_store_path.exists() || force {
                 let (file_info, trans) = crate::python::client::fetch_and_download(
-                    &dep.name, &dep.version, &full_store_path,
+                    &dep.name, &dep.version, &py_tag, &full_store_path,
                 )?;
                 packages.push(PackageEntry {
                     name: dep.name.clone(),
@@ -335,7 +335,17 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
 
     // ── Brew ────────────────────────────────────────────────────────────────
     let brew_deps = crate::brew::parser::detect_and_parse(project_dir)?;
-    let brew_section = if !brew_deps.is_empty() {
+    // Homebrew is a macOS-only path. On Linux a Brewfile warns-and-skips: system
+    // dependencies are expected to come from apt, not KONG.
+    let brew_section = if !brew_deps.is_empty() && !cfg!(target_os = "macos") {
+        tracing::warn!(
+            count = brew_deps.len(),
+            os = std::env::consts::OS,
+            "Brewfile detected but Homebrew is managed only on macOS — skipping. \
+             Install these system dependencies via apt on Linux."
+        );
+        None
+    } else if !brew_deps.is_empty() {
         info!(count = brew_deps.len(), "Found Brewfile dependencies");
         let mut packages = Vec::new();
 
@@ -510,7 +520,7 @@ pub fn platform_tag() -> String {
 }
 
 /// Convert "3.12.9" → "cp312" for use in wheel store path.
-fn short_python_tag(full_version: &str) -> String {
+pub fn short_python_tag(full_version: &str) -> String {
     let mut parts = full_version.splitn(3, '.');
     let major = parts.next().unwrap_or("3");
     let minor = parts.next().unwrap_or("0");
@@ -622,6 +632,7 @@ mod tests {
             rust: None,
             brew: None,
             scripts: HashMap::new(),
+            services: Vec::new(),
         };
 
         let json = serde_json::to_string_pretty(&rules).unwrap();

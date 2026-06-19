@@ -1,11 +1,17 @@
 use std::process::Command;
 
 fn main() {
-    // ── Slint UI compilation ────────────────────────────────────────────────
-    let config = slint_build::CompilerConfiguration::new()
-        .with_style("cupertino".into());
-    slint_build::compile_with_config("ui/kong.slint", config)
-        .expect("Slint build failed");
+    // ── Slint UI compilation (only when the `gui` feature is enabled) ────────
+    // Cargo sets CARGO_FEATURE_GUI when the `gui` feature is active. On headless
+    // Linux (built with --no-default-features) we skip Slint entirely so the
+    // build doesn't require fontconfig / X11 / OpenGL system libraries.
+    #[cfg(feature = "gui")]
+    {
+        let config = slint_build::CompilerConfiguration::new()
+            .with_style("cupertino".into());
+        slint_build::compile_with_config("ui/kong.slint", config)
+            .expect("Slint build failed");
+    }
 
     // ── Windows NSIS installer (release builds only) ────────────────────────
     // Only build the installer on Windows release builds.

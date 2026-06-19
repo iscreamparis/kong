@@ -4,7 +4,7 @@
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/iscreamparis/kong/blob/main/LICENSE-MIT)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
-[![Platform: Windows + macOS](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue.svg)]()
+[![Platform: Windows + macOS + Linux](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue.svg)]()
 [![Release](https://img.shields.io/github/v/release/iscreamparis/kong?include_prereleases&label=download)](https://github.com/iscreamparis/kong/releases)
 
 ---
@@ -48,6 +48,59 @@ cp target/release/kong ~/.local/bin/
 </details>
 
 The store lives at `~/Library/Application Support/kong/`. On macOS, KONG uses symlinks instead of NTFS junctions.
+
+### Linux
+
+Download **[Kong-0.7.0-linux-x64.tar.gz](https://github.com/iscreamparis/kong/releases/download/v0.7.0/Kong-0.7.0-linux-x64.tar.gz)** from the [Releases page](https://github.com/iscreamparis/kong/releases), extract it, and put `kong` on your PATH:
+
+```bash
+curl -fsSL -o Kong-0.7.0-linux-x64.tar.gz \
+  https://github.com/iscreamparis/kong/releases/download/v0.7.0/Kong-0.7.0-linux-x64.tar.gz
+tar -xzf Kong-0.7.0-linux-x64.tar.gz
+chmod +x kong
+mkdir -p ~/.local/bin && mv kong ~/.local/bin/   # ensure ~/.local/bin is on $PATH
+kong --version
+```
+
+The Linux release is a **statically linked musl binary** (`file kong` shows
+`statically linked`) — no glibc-version dependency, so it runs on assorted /
+older Ubuntu VMs with nothing else installed. It's a **CLI-only** build: the
+optional Slint GUI is disabled, so you don't need `fontconfig` / X11 / OpenGL
+system libraries either.
+
+<details>
+<summary>Build from source</summary>
+
+```bash
+git clone https://github.com/iscreamparis/kong
+cd kong
+cargo build --release --no-default-features   # CLI only, no GUI
+cp target/release/kong ~/.local/bin/
+```
+
+For a portable static build, target musl (matches the released binary):
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+sudo apt-get install -y musl-tools
+cargo build --release --no-default-features --target x86_64-unknown-linux-musl
+cp target/x86_64-unknown-linux-musl/release/kong ~/.local/bin/
+```
+
+</details>
+
+The store lives at `~/.local/share/kong/` (XDG data dir; respects
+`$XDG_DATA_HOME`). Linux uses symlinks + hard links — same as macOS, no
+NTFS junctions. KONG downloads its own Python interpreter
+(python-build-standalone), Node.js, and Rust toolchain, so you don't need
+`python3` / `node` / `rustup` on the host — just a C toolchain (`gcc`) for any
+crate that builds native code. System packages (`Brewfile`) are **not** managed
+on Linux — install those with `apt` instead (see Homebrew section).
+
+> Building **with** the GUI on Linux (`cargo build --release`, default features)
+> requires the Slint system dependencies: `libfontconfig1-dev`,
+> `libxcb1-dev`, `libxkbcommon-dev`, and OpenGL/Wayland dev headers. The
+> CLI-only build above avoids all of them.
 
 ---
 
@@ -125,7 +178,7 @@ downloads + verifies     →          global store (written once)
                                       └── brew/jq-1.7.1/
 ```
 
-**The key insight:** KONG creates symlinks (macOS/Linux) or NTFS junctions (Windows) from your project directory into its central store. Vite, Python, Node.js, and Cargo all find their packages by walking up the filesystem — exactly as they would with a real local install. Homebrew bottles are downloaded directly from GHCR and injected into `PATH` at runtime. No wrappers. No shims.
+**The key insight:** KONG creates symlinks (macOS/Linux) or NTFS junctions (Windows) from your project directory into its central store. Vite, Python, Node.js, and Cargo all find their packages by walking up the filesystem — exactly as they would with a real local install. Homebrew bottles are downloaded directly from GHCR and injected into `PATH` at runtime (macOS only — on Linux, system deps come from `apt`). No wrappers. No shims.
 
 ---
 
@@ -263,9 +316,15 @@ kong import            # moves packages to the global store, replaces with symli
 ```
 
 What happens:
-1. Scans existing `.venv` and `node_modules` and copies packages into the store
+1. **Adopts** the already-installed environment: finds the project's virtualenv
+   (any dir with a `pyvenv.cfg` — `.venv`, `venv`, `env`, …) and `node_modules`,
+   and copies each installed distribution into the store **byte-for-byte**,
+   including native extensions (`.so` / `.pyd` / `.node`). `kong.rules` is built
+   from the installed set — packages are **never re-resolved or re-downloaded**.
+   (Only an ecosystem with *no* installed env falls back to the resolver so a
+   genuinely-missing dep can still be fetched.)
 2. Removes the local directories
-3. Runs `kong rules` + `kong use` to recreate them as symlinks into the store
+3. Recreates them as symlinks into the store (like `kong use`)
 
 Your project keeps working exactly as before — but now shares packages with all your other projects.
 
@@ -397,7 +456,7 @@ No pip. No npm. No brew. No conda. No rustup. Just KONG.
 
 ### v1.0 — Production
 - [x] **macOS support** — symlinks, platform-specific selection, GHCR bottles
-- [ ] **Linux support** — CI pipeline for cross-platform builds
+- [x] **Linux support** — CLI-only build (Slint GUI gated behind an optional `gui` Cargo feature so no fontconfig/X11/OpenGL needed), XDG store path (`~/.local/share/kong`), symlinks + hard links, manylinux wheel selection, linux Node/Rust/Python runtime downloads, exec-bit `.bin/` shims; `Brewfile` warns-and-skips (apt manages system deps). Smoke-tested end-to-end on Ubuntu/WSL against real Python + Node manifests. **Prebuilt Linux release** — a static musl binary (`Kong-<version>-linux-x64.tar.gz`) is built + attached by CI (`.github/workflows/release-linux.yml`) on every `vX.Y.Z` tag, alongside the Windows installer and macOS DMG.
 - [ ] Private registry support (PyPI, npm, crates.io)
 - [ ] Windows installer with proper PATH management (NSIS → WiX)
 - [ ] `kong doctor` full report with auto-fix suggestions
@@ -409,7 +468,7 @@ No pip. No npm. No brew. No conda. No rustup. Just KONG.
 - **No external package managers.** KONG never calls `pip`, `npm`, `yarn`, `pnpm`, `cargo install`, or `brew` as subprocesses. All registry communication is in-house via `reqwest`.
 - **Idempotent.** Every command is safe to re-run. Already in store? Skip the download. Link already exists? Skip the link.
 - **Transparent.** Your project directory looks exactly like a normal project to every tool. KONG is invisible at runtime.
-- **Cross-platform.** Windows (NTFS junctions + hard links) and macOS (symlinks + hard links). Linux support coming.
+- **Cross-platform.** Windows (NTFS junctions + hard links), macOS, and Linux (symlinks + hard links). The native GUI is desktop-only; Linux ships as a CLI-only build.
 
 ---
 
@@ -432,7 +491,7 @@ KONG is early-stage software. Here's what doesn't work yet — no surprises.
 - **Cargo features and patches ignored.** Source replacement works for vanilla `Cargo.lock` deps, but `[features]` selections and `[patch]` overrides in `Cargo.toml` are not reflected.
 
 ### Homebrew
-- **macOS only.** Brew bottle support currently targets macOS (arm64_sequoia, arm64_sonoma). Linux Homebrew (linuxbrew) is not yet supported.
+- **macOS only.** Brew bottle support currently targets macOS (arm64_sequoia, arm64_sonoma). On **Linux**, a `Brewfile` is detected but **warns-and-skips** — KONG does not manage system packages on Linux yet (install them with `apt`). Linux Homebrew (linuxbrew) is not yet supported.
 - **No cask support.** Only formulas (command-line tools) are supported — GUI apps via `brew cask` are not handled.
 - **No version pinning.** KONG always fetches the latest stable bottle. Version-locked Brewfiles are not respected.
 

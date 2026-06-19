@@ -1,0 +1,106 @@
+name: Release (Linux)
+
+# Builds the headless, CLI-only KONG binary for Linux and attaches it to the
+# GitHub Release for the pushed version tag — the SAME `vX.Y.Z` tag that the
+# Windows (NSIS installer) and macOS (DMG) assets are published under.
+#
+# The Windows / macOS assets are still produced locally (NSIS / build-macos.sh)
+# and uploaded to the same release; this workflow only ADDS the Linux asset, so
+# pushing a tag yields a complete cross-platform release.
+#
+# Build details:
+#   * target  x86_64-unknown-linux-musl  → a fully STATIC binary (no glibc
+#     version dependency), so it runs on assorted / older Ubuntu VMs.
+#   * KONG already pins reqwest to `rustls-tls` with `default-features = false`
+#     (see Cargo.toml), so no system OpenSSL is needed for the static link.
+#   * `--no-default-features` disables the Slint GUI feature → no
+#     fontconfig / X11 / OpenGL system libs required (headless build).
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # Allow building the Linux artifact on demand without cutting a release
+  # (uploads as a workflow artifact instead of a release asset).
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to attach the asset to the release
+
+jobs:
+  build-linux:
+    name: Build static Linux binary (musl)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable) with musl target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-musl-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build (headless, static musl, no GUI)
+        run: cargo build --release --no-default-features --target x86_64-unknown-linux-musl
+
+      - name: Verify the binary is statically linked
+        run: |
+          BIN=target/x86_64-unknown-linux-musl/release/kong
+          file "$BIN"
+          file "$BIN" | grep -q 'static' || { echo "ERROR: binary is not static"; exit 1; }
+          "$BIN" --version
+
+      - name: Derive version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Package tarball (Kong-<version>-linux-x64.tar.gz)
+        id: package
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          BIN=target/x86_64-unknown-linux-musl/release/kong
+          strip "$BIN" || true
+          STAGE="$(mktemp -d)"
+          cp "$BIN" "$STAGE/kong"
+          chmod +x "$STAGE/kong"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$STAGE/" 2>/dev/null || true
+          ASSET="Kong-${VERSION}-linux-x64.tar.gz"
+          tar -C "$STAGE" -czf "$ASSET" .
+          sha256sum "$ASSET" | tee "$ASSET.sha256"
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+          ls -la "$ASSET"
+
+      # On a tag push: attach the asset to the matching GitHub Release.
+      # softprops/action-gh-release appends to the existing release for the tag
+      # (created when the Windows/macOS assets are uploaded), or creates it.
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.package.outputs.asset }}
+            ${{ steps.package.outputs.asset }}.sha256
+
+      # On manual run (no tag): keep the build available as a workflow artifact.
+      - name: Upload workflow artifact (non-tag runs)
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.asset }}
+          path: |
+            ${{ steps.package.outputs.asset }}
+            ${{ steps.package.outputs.asset }}.sha256

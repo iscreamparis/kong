@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod download;
 mod extract;
+#[cfg(feature = "gui")]
 mod gui;
 mod link;
 mod migrate;
@@ -107,13 +108,25 @@ fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    // No subcommand → launch GUI (e.g. double-click from Finder)
+    // No subcommand → launch GUI (e.g. double-click from Finder).
+    // On a CLI-only build (no `gui` feature, e.g. headless Linux) there is no
+    // window to open, so fall back to printing help.
     let command = match cli.command {
         Some(cmd) => cmd,
         None => {
-            let project_dir = std::env::current_dir().unwrap_or_default();
-            gui::launch(Some(&project_dir))?;
-            return Ok(());
+            #[cfg(feature = "gui")]
+            {
+                let project_dir = std::env::current_dir().unwrap_or_default();
+                gui::launch(Some(&project_dir))?;
+                return Ok(());
+            }
+            #[cfg(not(feature = "gui"))]
+            {
+                use clap::CommandFactory;
+                Cli::command().print_help().ok();
+                println!();
+                return Ok(());
+            }
         }
     };
 
@@ -399,9 +412,20 @@ fn main() -> Result<()> {
             report.print();
         }
         Commands::Gui(cmd) => {
-            let project_dir = cmd.path
-                .unwrap_or_else(|| std::env::current_dir().unwrap());
-            gui::launch(Some(&project_dir))?;
+            #[cfg(feature = "gui")]
+            {
+                let project_dir = cmd.path
+                    .unwrap_or_else(|| std::env::current_dir().unwrap());
+                gui::launch(Some(&project_dir))?;
+            }
+            #[cfg(not(feature = "gui"))]
+            {
+                let _ = cmd;
+                anyhow::bail!(
+                    "this kong binary was built without GUI support (CLI-only). \
+                     Rebuild with the `gui` feature enabled to use `kong gui`."
+                );
+            }
         }
         Commands::Delete(cmd) => {
             let project_dir = cmd.path
