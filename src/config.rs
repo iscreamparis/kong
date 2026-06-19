@@ -177,7 +177,7 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
             let full_store_path = store_root.join(&store_path);
             let transitive = if !full_store_path.exists() || force {
                 let (file_info, trans) = crate::python::client::fetch_and_download(
-                    &dep.name, &dep.version, &full_store_path,
+                    &dep.name, &dep.version, &py_tag, &full_store_path,
                 )?;
                 packages.push(PackageEntry {
                     name: dep.name.clone(),
@@ -520,7 +520,7 @@ pub fn platform_tag() -> String {
 }
 
 /// Convert "3.12.9" → "cp312" for use in wheel store path.
-fn short_python_tag(full_version: &str) -> String {
+pub fn short_python_tag(full_version: &str) -> String {
     let mut parts = full_version.splitn(3, '.');
     let major = parts.next().unwrap_or("3");
     let minor = parts.next().unwrap_or("0");
@@ -632,6 +632,7 @@ mod tests {
             rust: None,
             brew: None,
             scripts: HashMap::new(),
+            services: Vec::new(),
         };
 
         let json = serde_json::to_string_pretty(&rules).unwrap();
