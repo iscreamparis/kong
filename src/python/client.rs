@@ -320,6 +320,141 @@ impl TargetTag {
     }
 }
 
+/// The OS family of a wheel platform tag — what kind of binary it carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OsFamily {
+    Linux,
+    MacOs,
+    Windows,
+    /// `any` — pure-python, no platform binary, installable everywhere.
+    Pure,
+    /// An OS family we don't recognise (e.g. a future platform). Never matched.
+    Unknown,
+}
+
+/// The target platform we are resolving FOR, parsed once from the kong runtime's
+/// platform tag (e.g. "manylinux2014_x86_64", "win_amd64", "macosx_11_0_arm64").
+///
+/// This is what makes platform selection GENERAL and target-driven: a Linux
+/// target accepts manylinux/musllinux x86_64 + `any`; a macOS target accepts
+/// macosx + `any`; a Windows target accepts win_* + `any` — each REJECTING the
+/// others (the live bug: a `macosx_10_9_x86_64` wheel passed a naive
+/// `ends_with("x86_64")` check on a Linux target). Nothing here is hardcoded to
+/// "linux" — flip the runtime's OS and the accepted set flips with it.
+struct TargetPlatform {
+    family: OsFamily,
+    /// Normalised CPU architecture, e.g. "x86_64", "aarch64". Empty if unknown.
+    arch: String,
+}
+
+impl TargetPlatform {
+    /// Derive the target (os family, arch) from the runtime's platform tag.
+    /// `arch_suffix` (e.g. "x86_64.whl") is a fallback source of the arch when
+    /// the platform tag is empty/unparseable.
+    fn derive(platform_tag: &str, arch_suffix: &str) -> Self {
+        let family = Self::family_of(platform_tag);
+        let mut arch = Self::arch_of(platform_tag);
+        if arch.is_empty() {
+            // Fall back to the explicit arch suffix ("x86_64.whl" → "x86_64",
+            // "arm64.whl" → "aarch64", "amd64.whl" → "x86_64").
+            arch = Self::normalize_arch(arch_suffix.trim_end_matches(".whl"));
+        }
+        TargetPlatform { family, arch }
+    }
+
+    /// Classify a platform tag's OS family by its prefix (PEP 425/600 forms).
+    fn family_of(tag: &str) -> OsFamily {
+        if tag == "any" {
+            OsFamily::Pure
+        } else if tag.starts_with("manylinux")
+            || tag.starts_with("musllinux")
+            || tag.starts_with("linux")
+        {
+            OsFamily::Linux
+        } else if tag.starts_with("macosx") {
+            OsFamily::MacOs
+        } else if tag.starts_with("win") {
+            OsFamily::Windows
+        } else {
+            OsFamily::Unknown
+        }
+    }
+
+    /// Extract and normalise the CPU arch from a platform tag.
+    /// Handles: manylinux1/2010/2014_<arch>, manylinux_<glibc>_<arch> (PEP 600),
+    /// musllinux_<ver>_<arch>, linux_<arch>, macosx_<ver>_<arch>, win_<arch>/win32.
+    fn arch_of(tag: &str) -> String {
+        if tag == "any" || tag.is_empty() {
+            return String::new();
+        }
+        // Windows special cases first (no trailing arch token to split off).
+        if tag == "win32" {
+            return "x86".to_string();
+        }
+        if let Some(rest) = tag.strip_prefix("win_") {
+            return Self::normalize_arch(rest); // win_amd64, win_arm64
+        }
+        // For the rest, the architecture is the trailing token(s). The arch
+        // names we care about ("x86_64", "i686", "aarch64", "arm64", "ppc64le",
+        // "s390x", "universal2", "intel"…) are matched by suffix so the variable
+        // glibc/musl/macos version in the middle is irrelevant.
+        const KNOWN: &[&str] = &[
+            "x86_64", "i686", "aarch64", "arm64", "armv7l", "ppc64le", "ppc64",
+            "s390x", "universal2", "universal", "intel", "amd64", "x86",
+        ];
+        for k in KNOWN {
+            if tag.ends_with(k) {
+                return Self::normalize_arch(k);
+            }
+        }
+        String::new()
+    }
+
+    /// Collapse arch aliases to one canonical name per CPU.
+    fn normalize_arch(a: &str) -> String {
+        match a {
+            "amd64" | "x86_64" => "x86_64".to_string(),
+            "arm64" | "aarch64" => "aarch64".to_string(),
+            "x86" | "i686" | "win32" => "x86".to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    /// Does the target accept a single wheel platform tag?
+    /// True iff the tag is `any`, OR its OS family == target family AND its arch
+    /// is compatible with the target arch.
+    fn accepts(&self, tag: &str) -> bool {
+        let fam = Self::family_of(tag);
+        if fam == OsFamily::Pure {
+            return true; // `any` installs everywhere
+        }
+        if fam == OsFamily::Unknown || fam != self.family {
+            return false; // wrong OS family (the darwin-on-linux bug)
+        }
+        let wheel_arch = Self::arch_of(tag);
+        Self::arch_compatible(&self.arch, &wheel_arch)
+    }
+
+    /// Arch compatibility within the same OS family.
+    /// Exact match always wins. macOS fat tags ("universal2"/"universal"/"intel")
+    /// carry multiple slices and run on the relevant single-arch targets.
+    fn arch_compatible(target_arch: &str, wheel_arch: &str) -> bool {
+        if target_arch.is_empty() || wheel_arch.is_empty() {
+            // Without a known arch we cannot prove compatibility — be strict.
+            return false;
+        }
+        if target_arch == wheel_arch {
+            return true;
+        }
+        match wheel_arch {
+            // universal2 = x86_64 + arm64 ; intel = i386 + x86_64.
+            "universal2" => target_arch == "x86_64" || target_arch == "aarch64",
+            "universal" | "intel" => target_arch == "x86_64" || target_arch == "x86",
+            _ => false,
+        }
+    }
+}
+
 /// Score a wheel filename for the target, or None if it is INCOMPATIBLE.
 ///
 /// Wheel filename grammar (PEP 427):
@@ -338,12 +473,16 @@ fn score_wheel(filename: &str, target: &TargetTag, platform_tag: &str, arch_suff
     let py_field = parts[parts.len() - 3];
 
     // ── Platform compatibility ──────────────────────────────────────────────
+    // Derive the TARGET's (os_family, arch) once from the runtime platform tag,
+    // so the check is fully target-driven (the host running the resolver need
+    // not be the target OS). `arch_suffix` is kept for back-compat fallback when
+    // the runtime gave us no platform tag (it still encodes the target arch).
+    let target_plat = TargetPlatform::derive(platform_tag, arch_suffix);
+
     let plat_tags: Vec<&str> = plat_field.split('.').collect();
-    let platform_ok = plat_tags.iter().any(|t| {
-        *t == "any"
-            || (!platform_tag.is_empty() && *t == platform_tag)
-            || (!arch_suffix.is_empty() && t.ends_with(arch_suffix.trim_end_matches(".whl")))
-    });
+    // A wheel is platform-OK if ANY of its compressed platform tags is
+    // compatible with the target's OS family AND architecture.
+    let platform_ok = plat_tags.iter().any(|t| target_plat.accepts(t));
     let is_pure = plat_tags.iter().any(|t| *t == "any");
     if !platform_ok {
         return None;
@@ -599,5 +738,197 @@ mod tests {
         ];
         let chosen = select_best_file_for(&files, "cp310", PLAT, ARCH).expect("sdist fallback");
         assert_eq!(chosen.filename, "foo-1.0.tar.gz");
+    }
+
+    // ── THE PLATFORM BUG: darwin/win/other-arch wheels on a Linux target ─────
+    // The live failure: a `macosx_*_x86_64` wheel slipped past the old
+    // `ends_with("x86_64")` check on a Linux x86_64 target → darwin .so in the
+    // venv → ModuleNotFoundError. These lock the OS-family filter.
+
+    #[test]
+    fn rejects_darwin_wheel_on_linux_target() {
+        let t = target("cp310");
+        // arm64 darwin — arch differs too, but the OS family alone must reject it.
+        assert_eq!(
+            score_wheel("psycopg2-2.9.9-cp310-cp310-macosx_11_0_arm64.whl", &t, PLAT, ARCH),
+            None,
+            "darwin arm64 wheel must be rejected on a linux target"
+        );
+        // x86_64 DARWIN — the exact trap: same arch suffix, WRONG OS. This is the
+        // case the old ends_with('x86_64') check wrongly accepted.
+        assert_eq!(
+            score_wheel("psycopg2-2.9.9-cp310-cp310-macosx_10_9_x86_64.whl", &t, PLAT, ARCH),
+            None,
+            "darwin x86_64 wheel must be rejected on a linux target (the live bug)"
+        );
+        // universal2 darwin (fat) — still darwin, still rejected on linux.
+        assert_eq!(
+            score_wheel("pglast-6.0-cp310-cp310-macosx_11_0_universal2.whl", &t, PLAT, ARCH),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_windows_wheel_on_linux_target() {
+        let t = target("cp310");
+        assert_eq!(
+            score_wheel("foo-1.0-cp310-cp310-win_amd64.whl", &t, PLAT, ARCH),
+            None
+        );
+        assert_eq!(score_wheel("foo-1.0-cp310-cp310-win32.whl", &t, PLAT, ARCH), None);
+    }
+
+    #[test]
+    fn rejects_other_linux_arch_on_x86_64_target() {
+        let t = target("cp310");
+        // aarch64 / i686 linux wheels are wrong-arch for an x86_64 linux target.
+        assert_eq!(
+            score_wheel("foo-1.0-cp310-cp310-manylinux2014_aarch64.whl", &t, PLAT, ARCH),
+            None
+        );
+        assert_eq!(
+            score_wheel("foo-1.0-cp310-cp310-musllinux_1_2_aarch64.whl", &t, PLAT, ARCH),
+            None
+        );
+        assert_eq!(
+            score_wheel("foo-1.0-cp310-cp310-manylinux1_i686.whl", &t, PLAT, ARCH),
+            None
+        );
+    }
+
+    #[test]
+    fn accepts_all_linux_x86_64_variants() {
+        let t = target("cp310");
+        for plat in [
+            "manylinux1_x86_64",
+            "manylinux2010_x86_64",
+            "manylinux2014_x86_64",
+            "manylinux_2_17_x86_64",  // PEP 600 glibc form
+            "manylinux_2_34_x86_64",
+            "musllinux_1_1_x86_64",
+            "musllinux_1_2_x86_64",
+            "linux_x86_64",
+        ] {
+            let f = format!("foo-1.0-cp310-cp310-{plat}.whl");
+            assert!(
+                score_wheel(&f, &t, PLAT, ARCH).is_some(),
+                "{plat} must be accepted on a linux x86_64 target"
+            );
+        }
+    }
+
+    #[test]
+    fn selects_manylinux_rejecting_darwin_and_win_in_a_release() {
+        // The acceptance scenario from the task: only the manylinux wheel is valid.
+        let files = vec![
+            entry("pkg-1.0-cp310-cp310-macosx_11_0_arm64.whl"),
+            entry("pkg-1.0-cp310-cp310-macosx_10_9_x86_64.whl"),
+            entry("pkg-1.0-cp310-cp310-win_amd64.whl"),
+            entry("pkg-1.0-cp310-cp310-manylinux2014_x86_64.whl"),
+        ];
+        let chosen = select_best_file_for(&files, "cp310", PLAT, ARCH)
+            .expect("the manylinux wheel must be selected");
+        assert_eq!(chosen.filename, "pkg-1.0-cp310-cp310-manylinux2014_x86_64.whl");
+    }
+
+    // ── macOS target mirror (target-driven, not hardcoded to linux) ──────────
+    // Setting the runtime platform tag to a darwin one flips the accepted set.
+    const MAC_PLAT: &str = "macosx_11_0_arm64";
+    const MAC_ARCH: &str = "arm64.whl";
+
+    #[test]
+    fn macos_target_accepts_darwin_rejects_manylinux_and_win() {
+        let t = target("cp310");
+        // arm64 darwin accepted.
+        assert!(
+            score_wheel("pkg-1.0-cp310-cp310-macosx_11_0_arm64.whl", &t, MAC_PLAT, MAC_ARCH).is_some()
+        );
+        // universal2 carries arm64 — accepted on an arm64 mac.
+        assert!(
+            score_wheel("pkg-1.0-cp310-cp310-macosx_11_0_universal2.whl", &t, MAC_PLAT, MAC_ARCH).is_some()
+        );
+        // manylinux + win REJECTED on a mac target.
+        assert_eq!(
+            score_wheel("pkg-1.0-cp310-cp310-manylinux2014_x86_64.whl", &t, MAC_PLAT, MAC_ARCH),
+            None
+        );
+        assert_eq!(
+            score_wheel("pkg-1.0-cp310-cp310-win_amd64.whl", &t, MAC_PLAT, MAC_ARCH),
+            None
+        );
+        // pure-python still accepted.
+        assert!(
+            score_wheel("pkg-1.0-py3-none-any.whl", &t, MAC_PLAT, MAC_ARCH).is_some()
+        );
+        // x86_64-only darwin wheel rejected on an arm64 mac (arch mismatch).
+        assert_eq!(
+            score_wheel("pkg-1.0-cp310-cp310-macosx_10_9_x86_64.whl", &t, MAC_PLAT, MAC_ARCH),
+            None
+        );
+    }
+
+    #[test]
+    fn macos_target_picks_darwin_over_linux_in_a_release() {
+        let files = vec![
+            entry("pkg-1.0-cp310-cp310-manylinux2014_x86_64.whl"),
+            entry("pkg-1.0-cp310-cp310-win_amd64.whl"),
+            entry("pkg-1.0-cp310-cp310-macosx_11_0_arm64.whl"),
+        ];
+        let chosen = select_best_file_for(&files, "cp310", MAC_PLAT, MAC_ARCH)
+            .expect("darwin arm64 wheel must be selected on a mac target");
+        assert_eq!(chosen.filename, "pkg-1.0-cp310-cp310-macosx_11_0_arm64.whl");
+    }
+
+    // ── Windows target mirror ────────────────────────────────────────────────
+    #[test]
+    fn windows_target_accepts_win_rejects_others() {
+        let t = target("cp310");
+        const WIN_PLAT: &str = "win_amd64";
+        const WIN_ARCH: &str = "amd64.whl";
+        assert!(
+            score_wheel("pkg-1.0-cp310-cp310-win_amd64.whl", &t, WIN_PLAT, WIN_ARCH).is_some()
+        );
+        assert_eq!(
+            score_wheel("pkg-1.0-cp310-cp310-manylinux2014_x86_64.whl", &t, WIN_PLAT, WIN_ARCH),
+            None
+        );
+        assert_eq!(
+            score_wheel("pkg-1.0-cp310-cp310-macosx_11_0_arm64.whl", &t, WIN_PLAT, WIN_ARCH),
+            None
+        );
+        assert!(score_wheel("pkg-1.0-py3-none-any.whl", &t, WIN_PLAT, WIN_ARCH).is_some());
+    }
+
+    // ── unit tests on the platform parser itself ─────────────────────────────
+    #[test]
+    fn platform_parser_classifies_families_and_arch() {
+        assert_eq!(TargetPlatform::family_of("manylinux2014_x86_64"), OsFamily::Linux);
+        assert_eq!(TargetPlatform::family_of("musllinux_1_2_x86_64"), OsFamily::Linux);
+        assert_eq!(TargetPlatform::family_of("linux_x86_64"), OsFamily::Linux);
+        assert_eq!(TargetPlatform::family_of("macosx_11_0_arm64"), OsFamily::MacOs);
+        assert_eq!(TargetPlatform::family_of("win_amd64"), OsFamily::Windows);
+        assert_eq!(TargetPlatform::family_of("win32"), OsFamily::Windows);
+        assert_eq!(TargetPlatform::family_of("any"), OsFamily::Pure);
+
+        assert_eq!(TargetPlatform::arch_of("manylinux_2_17_x86_64"), "x86_64");
+        assert_eq!(TargetPlatform::arch_of("manylinux2014_aarch64"), "aarch64");
+        assert_eq!(TargetPlatform::arch_of("macosx_11_0_arm64"), "aarch64");
+        assert_eq!(TargetPlatform::arch_of("win_amd64"), "x86_64");
+        assert_eq!(TargetPlatform::arch_of("win32"), "x86");
+        assert_eq!(TargetPlatform::arch_of("any"), "");
+    }
+
+    #[test]
+    fn derive_falls_back_to_arch_suffix_when_no_platform_tag() {
+        // If the runtime gave no platform tag, the arch_suffix still pins arch,
+        // but with no family we cannot accept any native wheel — only `any`.
+        let t = target("cp310");
+        let s = score_wheel("pkg-1.0-py3-none-any.whl", &t, "", "x86_64.whl");
+        assert!(s.is_some(), "pure-python still installs with no platform tag");
+        assert_eq!(
+            score_wheel("pkg-1.0-cp310-cp310-manylinux2014_x86_64.whl", &t, "", "x86_64.whl"),
+            None,
+            "without a known target OS family, native wheels are not provably compatible"
+        );
     }
 }
