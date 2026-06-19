@@ -153,16 +153,46 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
         info!(count = python_deps.len(), version = %runtime.version, "Processing Python packages");
         let mut packages = Vec::new();
 
-        // BFS queue — seed with direct deps, then expand transitives
+        // BFS queue — seed with direct deps, then expand transitives.
         use std::collections::VecDeque;
-        // Build a name→version map from user's explicit pins so transitive
-        // resolution skips PyPI when the version is already declared.
-        let pinned: HashMap<String, String> = python_deps
-            .iter()
-            .map(|d| (crate::python::parser::normalize_python_name(&d.name), d.version.clone()))
-            .collect();
+        use crate::python::pep440::SpecifierSet;
+        use crate::python::parser::normalize_python_name;
+
+        // Accumulated PEP 440 constraints per package name. We seed it with the
+        // user's direct requirements (exact pins become an `==` clause) and
+        // extend it as transitive `Requires-Dist` bounds are discovered, so a
+        // dependency is resolved against the AND of every specifier we've seen —
+        // a parent's `<2` upper bound is honored even when the global latest is
+        // 2.x. (Not a full graph SAT: it's order-dependent union accumulation,
+        // which is enough for the common "parent caps a transitive dep" case.)
+        let mut constraints: HashMap<String, SpecifierSet> = HashMap::new();
+        for d in &python_deps {
+            let norm = normalize_python_name(&d.name);
+            let entry = constraints.entry(norm).or_default();
+            if !d.version.is_empty() {
+                entry.merge(&SpecifierSet::parse(&format!("=={}", d.version)));
+            } else if !d.spec.is_empty() {
+                entry.merge(&SpecifierSet::parse(&d.spec));
+            }
+        }
+
+        // Resolve every direct dep that arrived without a concrete version
+        // (a non-exact specifier) to the highest version that satisfies it.
+        let mut resolved_direct: Vec<crate::python::parser::PythonDep> = Vec::new();
+        for mut d in python_deps {
+            if d.version.is_empty() {
+                let norm = normalize_python_name(&d.name);
+                let spec = constraints.get(&norm).cloned().unwrap_or_default();
+                match crate::python::client::resolve_best_version(&d.name, &spec) {
+                    Ok(v) => { d.version = v; }
+                    Err(e) => { tracing::warn!(pkg = %d.name, "Could not resolve version: {e}"); continue; }
+                }
+            }
+            resolved_direct.push(d);
+        }
+
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut queue: VecDeque<crate::python::parser::PythonDep> = python_deps.into_iter().collect();
+        let mut queue: VecDeque<crate::python::parser::PythonDep> = resolved_direct.into_iter().collect();
 
         while let Some(dep) = queue.pop_front() {
             let key = format!("{}-{}", dep.name.to_lowercase().replace('-', "_"), dep.version);
@@ -203,35 +233,45 @@ pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
                 )))
             };
 
-            // Enqueue transitive deps not yet seen
+            // Enqueue transitive deps not yet seen.
             for t in transitive {
+                let norm = normalize_python_name(&t.name);
+
+                // Record the parent-declared bound into the accumulated set for
+                // this dependency, so its resolution honors the parent's cap.
+                {
+                    let entry = constraints.entry(norm.clone()).or_default();
+                    if !t.version.is_empty() {
+                        // Parent declared an exact pin — strongest constraint.
+                        entry.merge(&SpecifierSet::parse(&format!("=={}", t.version)));
+                    } else if !t.spec.is_empty() {
+                        entry.merge(&SpecifierSet::parse(&t.spec));
+                    }
+                }
+
                 let t_key = t.name.to_lowercase().replace('-', "_");
-                // Exact name match (ignoring version) — don't re-process any version of same pkg
+                // Exact name match (ignoring version) — don't re-process any version of same pkg.
                 if seen.iter().any(|s| {
                     let s_name = s.split('-').next().unwrap_or(s);
                     s_name == t_key
                 }) {
                     continue;
                 }
-                // version is empty when no exact pin found (range/wildcard specifiers).
-                // Resolution order:
-                //   1. User's explicit pin from requirements.txt / lockfile
-                //   2. Latest compatible version from PyPI JSON API
-                let version = if t.version.is_empty() {
-                    let norm = crate::python::parser::normalize_python_name(&t.name);
-                    if let Some(pinned_ver) = pinned.get(&norm) {
-                        debug!(pkg = %t.name, ver = %pinned_ver, "Using user-pinned version for transitive dep");
-                        pinned_ver.clone()
-                    } else {
-                        match crate::python::client::resolve_latest_version(&t.name) {
-                            Ok(v) => v,
-                            Err(e) => { tracing::warn!(pkg = %t.name, "Could not resolve version: {e}"); continue; }
-                        }
-                    }
-                } else {
-                    t.version
+
+                // Resolve to the highest version satisfying the AND of all
+                // constraints seen for this package (an exact `==` short-circuits
+                // inside resolve_best_version; a genuinely unsatisfiable bound is
+                // logged and falls back to latest rather than aborting).
+                let spec = constraints.get(&norm).cloned().unwrap_or_default();
+                let version = match crate::python::client::resolve_best_version(&t.name, &spec) {
+                    Ok(v) => v,
+                    Err(e) => { tracing::warn!(pkg = %t.name, "Could not resolve version: {e}"); continue; }
                 };
-                queue.push_back(crate::python::parser::PythonDep { name: t.name, version });
+                queue.push_back(crate::python::parser::PythonDep {
+                    name: t.name,
+                    version,
+                    spec: String::new(),
+                });
             }
         }
         let section = PythonSection {

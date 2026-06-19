@@ -4,10 +4,18 @@ use anyhow::{Context, Result};
 use tracing::debug;
 
 /// A parsed dependency from a Python manifest.
+///
+/// `version` is a concrete pin when the manifest gave one (`==X.Y.Z`, or a
+/// lockfile's resolved version); it is empty for a non-exact requirement, in
+/// which case `spec` carries the raw PEP 440 specifier (`>=2.10,<3`, `~=1.4`)
+/// so the resolver downloads the highest version that satisfies it rather than
+/// the global latest. Lockfiles produce an exact `version` and an empty `spec`.
 #[derive(Debug, Clone)]
 pub struct PythonDep {
     pub name: String,
     pub version: String,
+    /// Raw PEP 440 specifier from the manifest (empty for exact lockfile pins).
+    pub spec: String,
 }
 
 /// Detect and parse Python dependency files in a project directory.
@@ -58,24 +66,69 @@ pub fn parse_requirements_txt(path: &Path) -> Result<Vec<PythonDep>> {
 
     let mut deps = Vec::new();
     for line in content.lines() {
+        // Strip inline comments (`pkg==1.0  # note`) then trim.
+        let line = line.split(" #").next().unwrap_or(line);
         let line = line.trim();
 
         // Skip empty, comments, flags, includes
         if line.is_empty() || line.starts_with('#') || line.starts_with('-') {
             continue;
         }
-
-        // Parse name==version
-        if let Some((name, version)) = line.split_once("==") {
-            deps.push(PythonDep {
-                name: normalize_python_name(name.trim()),
-                version: version.trim().to_string(),
-            });
+        // Skip URL / VCS / local-path requirements (not PyPI-resolvable here).
+        if line.contains("://") || line.starts_with('.') || line.starts_with('/') {
+            continue;
         }
-        // TODO: handle >= and other specifiers as warnings
+
+        if let Some(dep) = parse_requirement_line(line) {
+            deps.push(dep);
+        }
     }
 
     Ok(deps)
+}
+
+/// Parse one requirement line into a name + (exact version OR raw specifier).
+///
+/// Honors every PEP 440 operator: an exact `==X.Y.Z` becomes a concrete
+/// `version`; anything else (`>=`, `<`, `~=`, ranges, `!=`, `==X.*`) is kept as
+/// the raw `spec` for the resolver to satisfy. A bare `name` (no specifier) ->
+/// empty version + empty spec (resolves to latest).
+fn parse_requirement_line(line: &str) -> Option<PythonDep> {
+    // Strip environment markers and extras for the name; keep the specifier raw.
+    let body = line.split(';').next().unwrap_or(line).trim();
+    if body.is_empty() {
+        return None;
+    }
+    // Name runs until the first specifier operator. Brackets ([extras]) and the
+    // usual name chars are part of the name token.
+    let name_end = body
+        .find(|c: char| matches!(c, '=' | '!' | '<' | '>' | '~' | ' ' | '\t'))
+        .unwrap_or(body.len());
+    let raw_name = body[..name_end].trim();
+    let name = match raw_name.find('[') {
+        Some(b) => raw_name[..b].trim(),
+        None => raw_name,
+    };
+    if name.is_empty() {
+        return None;
+    }
+    let spec = body[name_end..].trim().to_string();
+
+    // Exact single `==X.Y.Z` pin → concrete version, empty spec.
+    let set = crate::python::pep440::SpecifierSet::parse(&spec);
+    if let Some(pin) = set.exact_pin() {
+        return Some(PythonDep {
+            name: normalize_python_name(name),
+            version: pin,
+            spec: String::new(),
+        });
+    }
+
+    Some(PythonDep {
+        name: normalize_python_name(name),
+        version: String::new(),
+        spec,
+    })
 }
 
 /// Parse pyproject.toml [project.dependencies] or [tool.poetry.dependencies].
@@ -95,7 +148,9 @@ pub fn parse_pyproject_toml(path: &Path) -> Result<Vec<PythonDep>> {
     {
         for entry in project_deps {
             if let Some(s) = entry.as_str() {
-                if let Some(dep) = parse_pep508_simple(s) {
+                // PEP 508 requirement strings are the same grammar as a
+                // requirements.txt line — reuse the specifier-preserving parser.
+                if let Some(dep) = parse_requirement_line(s) {
                     deps.push(dep);
                 }
             }
@@ -114,20 +169,17 @@ pub fn parse_pyproject_toml(path: &Path) -> Result<Vec<PythonDep>> {
                 if name == "python" {
                     continue;
                 }
-                let version = match value {
-                    toml::Value::String(v) => v.trim_start_matches('^').trim_start_matches('~').to_string(),
+                let raw = match value {
+                    toml::Value::String(v) => v.to_string(),
                     toml::Value::Table(t) => t
                         .get("version")
                         .and_then(|v| v.as_str())
-                        .map(|v| v.trim_start_matches('^').trim_start_matches('~').to_string())
+                        .map(|v| v.to_string())
                         .unwrap_or_default(),
                     _ => continue,
                 };
-                if !version.is_empty() {
-                    deps.push(PythonDep {
-                        name: normalize_python_name(name),
-                        version,
-                    });
+                if let Some(dep) = parse_poetry_constraint(name, &raw) {
+                    deps.push(dep);
                 }
             }
         }
@@ -152,6 +204,7 @@ pub fn parse_uv_lock(path: &Path) -> Result<Vec<PythonDep>> {
                 deps.push(PythonDep {
                     name: normalize_python_name(name),
                     version: version.to_string(),
+                    spec: String::new(),
                 });
             }
         }
@@ -176,6 +229,7 @@ pub fn parse_poetry_lock(path: &Path) -> Result<Vec<PythonDep>> {
                 deps.push(PythonDep {
                     name: normalize_python_name(name),
                     version: version.to_string(),
+                    spec: String::new(),
                 });
             }
         }
@@ -205,6 +259,7 @@ pub fn parse_pipfile_lock(path: &Path) -> Result<Vec<PythonDep>> {
                     deps.push(PythonDep {
                         name: normalize_python_name(name),
                         version: version.to_string(),
+                        spec: String::new(),
                     });
                 }
             }
@@ -214,20 +269,88 @@ pub fn parse_pipfile_lock(path: &Path) -> Result<Vec<PythonDep>> {
     Ok(deps)
 }
 
-/// Very simple PEP 508 parser: extract name and version from "name>=version" or "name==version".
-fn parse_pep508_simple(spec: &str) -> Option<PythonDep> {
-    let spec = spec.split(';').next()?.trim(); // strip environment markers
-
-    for op in &["==", ">=", "~=", "!=", "<="] {
-        if let Some((name, version)) = spec.split_once(op) {
-            return Some(PythonDep {
-                name: normalize_python_name(name.trim()),
-                version: version.split(',').next()?.trim().to_string(),
-            });
-        }
+/// Convert a Poetry version constraint into a PEP 440 specifier and parse it.
+///
+/// Poetry uses caret/tilde sugar that PEP 440 expresses differently:
+///   `^1.2.3` → `>=1.2.3,<2.0.0` (compatible within the leftmost non-zero part)
+///   `~1.2.3` → `>=1.2.3,<1.3.0`
+///   `~1.2`   → `>=1.2,<1.3`
+/// Plain PEP 440 constraints (`>=1.0`, `==1.2.3`, `1.2.*`) and a bare exact
+/// version (`1.2.3`, which Poetry treats as `==`) pass through.
+fn parse_poetry_constraint(name: &str, raw: &str) -> Option<PythonDep> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "*" {
+        return Some(PythonDep {
+            name: normalize_python_name(name),
+            version: String::new(),
+            spec: String::new(),
+        });
     }
 
-    None
+    let spec = if let Some(rest) = raw.strip_prefix('^') {
+        caret_to_specifier(rest.trim())
+    } else if let Some(rest) = raw.strip_prefix('~') {
+        tilde_to_specifier(rest.trim())
+    } else if raw
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+    {
+        // Bare version → Poetry exact pin.
+        format!("=={raw}")
+    } else {
+        raw.to_string()
+    };
+
+    let set = crate::python::pep440::SpecifierSet::parse(&spec);
+    if let Some(pin) = set.exact_pin() {
+        return Some(PythonDep {
+            name: normalize_python_name(name),
+            version: pin,
+            spec: String::new(),
+        });
+    }
+    Some(PythonDep {
+        name: normalize_python_name(name),
+        version: String::new(),
+        spec,
+    })
+}
+
+/// `^X.Y.Z` → `>=X.Y.Z,<(next compatible)`. The upper bound bumps the leftmost
+/// non-zero component: `^1.2.3`→`<2.0.0`, `^0.2.3`→`<0.3.0`, `^0.0.3`→`<0.0.4`.
+fn caret_to_specifier(v: &str) -> String {
+    let parts: Vec<u64> = v.split('.').filter_map(|p| p.parse::<u64>().ok()).collect();
+    if parts.is_empty() {
+        return format!(">={v}");
+    }
+    let (mut maj, mut min, mut patch) = (
+        parts.first().copied().unwrap_or(0),
+        parts.get(1).copied().unwrap_or(0),
+        parts.get(2).copied().unwrap_or(0),
+    );
+    if maj > 0 {
+        maj += 1;
+        min = 0;
+        patch = 0;
+    } else if min > 0 {
+        min += 1;
+        patch = 0;
+    } else {
+        patch += 1;
+    }
+    format!(">={v},<{maj}.{min}.{patch}")
+}
+
+/// `~X.Y.Z` → `>=X.Y.Z,<X.(Y+1).0`; `~X.Y` → `>=X.Y,<X.(Y+1)`; `~X` → `>=X,<X+1`.
+fn tilde_to_specifier(v: &str) -> String {
+    let parts: Vec<u64> = v.split('.').filter_map(|p| p.parse::<u64>().ok()).collect();
+    match parts.len() {
+        0 => format!(">={v}"),
+        1 => format!(">={v},<{}", parts[0] + 1),
+        _ => format!(">={v},<{}.{}", parts[0], parts[1] + 1),
+    }
 }
 
 /// Normalize Python package name per PEP 503: lowercase, replace -._ with _.
@@ -260,13 +383,66 @@ mod tests {
     }
 
     #[test]
-    fn parse_pep508() {
-        let dep = parse_pep508_simple("requests>=2.28.0").unwrap();
+    fn parse_requirement_specifier_preserved() {
+        // Non-exact specifier is kept raw, version stays empty for resolution.
+        let dep = parse_requirement_line("requests>=2.28.0").unwrap();
         assert_eq!(dep.name, "requests");
-        assert_eq!(dep.version, "2.28.0");
+        assert_eq!(dep.version, "");
+        assert_eq!(dep.spec, ">=2.28.0");
 
-        let dep = parse_pep508_simple("flask==3.0.0; python_version >= '3.8'").unwrap();
+        // Range with upper bound is preserved whole.
+        let dep = parse_requirement_line("urllib3>=1.21.1,<3").unwrap();
+        assert_eq!(dep.name, "urllib3");
+        assert_eq!(dep.spec, ">=1.21.1,<3");
+
+        // Exact pin → concrete version, no spec.
+        let dep = parse_requirement_line("flask==3.0.0; python_version >= '3.8'").unwrap();
         assert_eq!(dep.name, "flask");
         assert_eq!(dep.version, "3.0.0");
+        assert_eq!(dep.spec, "");
+
+        // Extras are stripped from the name.
+        let dep = parse_requirement_line("requests[security]>=2.0").unwrap();
+        assert_eq!(dep.name, "requests");
+        assert_eq!(dep.spec, ">=2.0");
+    }
+
+    #[test]
+    fn parse_requirements_keeps_ranges() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            "requests==2.31.0\nflask>=3.0,<4  # web\nhttps://x/y.whl\n# comment\n-r other.txt\n",
+        )
+        .unwrap();
+        let deps = parse_requirements_txt(tmp.path()).unwrap();
+        // requests (exact) + flask (range); the URL and comment are skipped.
+        assert_eq!(deps.len(), 2);
+        assert_eq!(deps[0].version, "2.31.0");
+        assert_eq!(deps[1].name, "flask");
+        assert_eq!(deps[1].version, "");
+        assert_eq!(deps[1].spec, ">=3.0,<4");
+    }
+
+    #[test]
+    fn poetry_caret_tilde_conversion() {
+        let d = parse_poetry_constraint("django", "^4.2.1").unwrap();
+        assert_eq!(d.spec, ">=4.2.1,<5.0.0");
+
+        let d = parse_poetry_constraint("foo", "^0.2.3").unwrap();
+        assert_eq!(d.spec, ">=0.2.3,<0.3.0");
+
+        let d = parse_poetry_constraint("bar", "~1.4").unwrap();
+        assert_eq!(d.spec, ">=1.4,<1.5");
+
+        // Bare version is an exact Poetry pin.
+        let d = parse_poetry_constraint("baz", "2.1.0").unwrap();
+        assert_eq!(d.version, "2.1.0");
+        assert_eq!(d.spec, "");
+
+        // Wildcard means latest.
+        let d = parse_poetry_constraint("qux", "*").unwrap();
+        assert_eq!(d.version, "");
+        assert_eq!(d.spec, "");
     }
 }

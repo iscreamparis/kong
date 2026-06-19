@@ -35,11 +35,18 @@ struct PypiDigests {
     sha256: String,
 }
 
-/// A resolved transitive dependency (name + exact version from PyPI).
+/// A transitive dependency discovered from a wheel's `Requires-Dist`.
+///
+/// `version` is a concrete pin ONLY when the parent declared an exact `==X.Y.Z`
+/// (with no wildcard); otherwise it is empty and `spec` carries the original
+/// PEP 440 specifier (`>=2.10,<3`, `~=1.4`, …) so the resolver can pick the
+/// highest version that actually satisfies the bound — not the global latest.
 #[derive(Debug, Clone)]
 pub struct TransitiveDep {
     pub name: String,
     pub version: String,
+    /// The raw specifier string as declared by the parent (may be empty).
+    pub spec: String,
 }
 
 /// Fetch metadata from PyPI, download the best wheel, and extract to store.
@@ -100,8 +107,8 @@ pub fn fetch_and_download(name: &str, version: &str, target_py_tag: &str, store_
     }, transitive))
 }
 
-/// Resolve the latest version of a package from PyPI (used for transitive deps
-/// that have no pinned version in the manifest or lockfile).
+/// Resolve the latest version of a package from PyPI (used as the last-resort
+/// fallback when a package has no applicable specifier).
 pub fn resolve_latest_version(name: &str) -> Result<String> {
     #[derive(Deserialize)]
     struct Info { version: String }
@@ -116,6 +123,61 @@ pub fn resolve_latest_version(name: &str) -> Result<String> {
     Ok(resp.info.version)
 }
 
+/// List every release version string for a package from PyPI (the keys of the
+/// `releases` map), filtering out yanked-only releases (those whose every file
+/// is yanked have an empty file list and are skipped).
+pub fn list_versions(name: &str) -> Result<Vec<String>> {
+    #[derive(Deserialize)]
+    struct Response {
+        releases: std::collections::HashMap<String, Vec<serde_json::Value>>,
+    }
+
+    let url = format!("https://pypi.org/pypi/{name}/json");
+    let resp: Response = reqwest::blocking::get(&url)
+        .with_context(|| format!("failed to fetch PyPI metadata for {name}"))?
+        .json()
+        .with_context(|| format!("failed to parse PyPI response for {name}"))?;
+
+    // A release with no files has been fully removed/never-published — skip it.
+    let versions: Vec<String> = resp
+        .releases
+        .into_iter()
+        .filter(|(_, files)| !files.is_empty())
+        .map(|(v, _)| v)
+        .collect();
+    Ok(versions)
+}
+
+/// Resolve the highest PyPI version of `name` that satisfies `spec`.
+///
+/// This is the core from-scratch resolver: instead of taking the global latest,
+/// we list every released version and pick the highest one matching the PEP 440
+/// specifier set. An empty specifier means "no constraint" → the latest stable.
+/// If nothing satisfies (a genuine conflict / impossible bound) we warn and fall
+/// back to the global latest so provisioning degrades rather than aborting.
+pub fn resolve_best_version(name: &str, spec: &crate::python::pep440::SpecifierSet) -> Result<String> {
+    // An exact `==` pin needs no version listing — honor it directly.
+    if let Some(pin) = spec.exact_pin() {
+        debug!(pkg = %name, ver = %pin, "Exact pin — using as-is");
+        return Ok(pin);
+    }
+
+    let versions = list_versions(name)?;
+    if let Some(best) = crate::python::pep440::select_best(&versions, spec) {
+        debug!(pkg = %name, ver = %best, "Selected highest version satisfying specifier");
+        return Ok(best.to_string());
+    }
+
+    // Nothing satisfied the constraint. This is either an unsatisfiable bound or
+    // a version PyPI lists in a form we couldn't parse. Be loud, then degrade.
+    tracing::warn!(
+        pkg = %name,
+        "No released version satisfies the constraint; falling back to latest \
+         (provisioning may need a manual pin)"
+    );
+    resolve_latest_version(name)
+}
+
 /// Parse `Requires-Dist` lines — public alias so config.rs can call it for
 /// already-cached packages.
 pub fn parse_requires_dist_pub(entries: &[String]) -> Vec<TransitiveDep> {
@@ -124,7 +186,14 @@ pub fn parse_requires_dist_pub(entries: &[String]) -> Vec<TransitiveDep> {
 
 /// Parse `Requires-Dist` lines from PyPI `info.requires_dist`.
 /// Skips extras (conditional deps like `extra == "async"`) and environment
-/// markers that would exclude this platform. Returns bare name + resolved version.
+/// markers that would exclude this platform. Returns the dependency name, an
+/// exact pin if the parent declared one (`==X.Y.Z`), and the RAW PEP 440
+/// specifier string so the resolver can pick the highest satisfying version.
+///
+/// A bracketed extras request on the dependency itself (`requests[security]`)
+/// has the `[...]` stripped — we resolve the base package and let its own
+/// `Requires-Dist` surface any extra-gated deps (which we skip, matching pip's
+/// default no-extras behaviour for transitive resolution here).
 fn parse_requires_dist(entries: &[String]) -> Vec<TransitiveDep> {
     let mut deps = Vec::new();
     for entry in entries {
@@ -133,45 +202,46 @@ fn parse_requires_dist(entries: &[String]) -> Vec<TransitiveDep> {
             continue;
         }
         // Strip environment markers (semicolon and after)
-        let spec = if let Some(idx) = entry.find(';') {
+        let body = if let Some(idx) = entry.find(';') {
             entry[..idx].trim()
         } else {
             entry.trim()
         };
-        // Parse "Name>=version,<other" — take the name part only
-        let name_end = spec.find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '.')
-            .unwrap_or(spec.len());
-        let dep_name = spec[..name_end].trim().to_string();
+        // Parse "Name>=version,<other" — split the name (incl. optional [extras])
+        // from the specifier. The name runs until the first specifier operator
+        // or whitespace; brackets are part of the name token.
+        let name_end = body
+            .find(|c: char| {
+                !c.is_alphanumeric() && c != '-' && c != '_' && c != '.' && c != '[' && c != ']'
+            })
+            .unwrap_or(body.len());
+        // Drop any [extras] suffix from the resolved package name.
+        let raw_name = body[..name_end].trim();
+        let dep_name = match raw_name.find('[') {
+            Some(b) => raw_name[..b].trim().to_string(),
+            None => raw_name.to_string(),
+        };
         if dep_name.is_empty() {
             continue;
         }
-        // Extract minimum version from first specifier like ">=3.1" or "==3.1.0"
-        let version_str = &spec[name_end..].trim();
-        if let Some(ver) = extract_min_version(version_str) {
-            deps.push(TransitiveDep { name: dep_name, version: ver });
-        } else {
-            // No pin — will be resolved to latest
-            deps.push(TransitiveDep { name: dep_name, version: String::new() });
-        }
+        let spec_str = body[name_end..].trim().to_string();
+        // Honor an exact pin directly; otherwise carry the raw specifier.
+        let version = extract_exact_pin(&spec_str).unwrap_or_default();
+        deps.push(TransitiveDep {
+            name: dep_name,
+            version,
+            spec: spec_str,
+        });
     }
     deps
 }
 
-/// Extract a concrete version from a specifier like "==3.1.0" → "3.1.0".
-/// Only returns exact, non-wildcard pins (==). For >= / ~= / ==X.* / etc.
-/// returns None so the caller resolves via PyPI or the user's pinned list.
-fn extract_min_version(spec: &str) -> Option<String> {
-    for part in spec.split(',') {
-        let part = part.trim();
-        if let Some(v) = part.strip_prefix("==") {
-            let v = v.trim();
-            // Reject wildcard equality like "==1.*" — not a real release on PyPI.
-            if !v.contains('*') {
-                return Some(v.to_string());
-            }
-        }
-    }
-    None
+/// Extract a concrete version from a specifier ONLY when it is a single exact,
+/// non-wildcard `==X.Y.Z` pin. For >= / ~= / ==X.* / ranges → None, so the
+/// caller resolves the highest satisfying version via the specifier set.
+fn extract_exact_pin(spec: &str) -> Option<String> {
+    let set = crate::python::pep440::SpecifierSet::parse(spec);
+    set.exact_pin()
 }
 
 /// Select the best file for the target interpreter.
