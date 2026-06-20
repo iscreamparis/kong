@@ -129,13 +129,69 @@ pub fn write_rules(rules: &KongRules, path: &Path) -> Result<()> {
     Ok(())
 }
 
-// ── Rules generation ────────────────────────────────────────────────────────
+// ── Project-name resolution ───────────────────────────────────────────────────
 
-pub fn generate_rules(project_dir: &Path, force: bool) -> Result<KongRules> {
-    let project_name = project_dir
+/// Derive a stable, filesystem-safe env name for a project directory that is
+/// UNIQUE per absolute path. Same folder → same slug across runs; two different
+/// folders that share a basename → different slugs.
+///
+/// Shape: `<basename>-<8 hex of sha256(canonical-abs-path)>`. The path is
+/// canonicalized so symlinked / relative invocations of the same folder agree;
+/// if canonicalization fails (e.g. the dir doesn't exist yet) we fall back to the
+/// path as given so the function never panics.
+pub fn path_slug(project_dir: &Path) -> String {
+    use sha2::{Digest, Sha256};
+
+    let basename = project_dir
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_else(|| "project".to_string());
+
+    let abs = std::fs::canonicalize(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
+    // Normalize the string form so the hash is stable for the same path. On
+    // Windows, canonicalize() yields a consistent representation already.
+    let abs_str = abs.to_string_lossy();
+
+    let mut hasher = Sha256::new();
+    hasher.update(abs_str.as_bytes());
+    let digest = hasher.finalize();
+    let short = hex::encode(&digest[..4]); // 8 hex chars
+
+    let safe_base = sanitize_name(&basename);
+    format!("{safe_base}-{short}")
+}
+
+/// Make a name filesystem-safe (used for the basename portion of a slug).
+fn sanitize_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .collect();
+    if cleaned.is_empty() { "project".to_string() } else { cleaned }
+}
+
+/// Resolve the env name for an EXISTING project: honor the `project` field in the
+/// project's `kong.rules` if present (this is what `kong use` recorded), else fall
+/// back to a path-unique slug. Used by every command that locates an existing env
+/// so they all agree on the same RULEZ directory.
+pub fn resolve_project_name(project_dir: &Path) -> String {
+    let rules_path = project_dir.join("kong.rules");
+    if let Ok(rules) = read_rules(&rules_path) {
+        if !rules.project.trim().is_empty() {
+            return rules.project;
+        }
+    }
+    path_slug(project_dir)
+}
+
+// ── Rules generation ────────────────────────────────────────────────────────
+
+pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> Result<KongRules> {
+    // The env-location key. An explicit `--name` always wins; otherwise we derive
+    // a stable, path-unique slug so that two folders sharing a basename (e.g.
+    // `~/CRM-master/crm-backend` vs `~/CRM-erd/crm-backend`) never collide on one
+    // RULEZ env, while the SAME folder is stable across runs.
+    let project_name = name.unwrap_or_else(|| path_slug(project_dir));
 
     let store_root = crate::store::store_root()?;
     let now = chrono::Utc::now().to_rfc3339();
@@ -680,5 +736,75 @@ mod tests {
         assert_eq!(parsed.version, 1);
         assert_eq!(parsed.runtimes.unwrap().python.unwrap().version, "3.12.9");
         assert_eq!(parsed.python.unwrap().packages.len(), 1);
+    }
+
+    // ── Env-name keying tests ────────────────────────────────────────────────
+
+    /// `generate_rules` with an explicit `--name` records exactly that name in
+    /// `KongRules.project`.
+    #[test]
+    fn generate_rules_honors_explicit_name() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // No manifests in the empty dir → fast path, no network resolution.
+        let rules =
+            generate_rules(tmp.path(), false, Some("my-custom-name".to_string())).unwrap();
+        assert_eq!(rules.project, "my-custom-name");
+    }
+
+    /// Two DIFFERENT absolute paths that share the SAME basename must produce
+    /// DIFFERENT `project` slugs; the SAME path must be stable across calls.
+    #[test]
+    fn path_slug_distinguishes_same_basename_and_is_stable() {
+        let root_a = tempfile::TempDir::new().unwrap();
+        let root_b = tempfile::TempDir::new().unwrap();
+
+        // Same basename ("crm-backend") under two different parents.
+        let a = root_a.path().join("crm-backend");
+        let b = root_b.path().join("crm-backend");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+
+        let slug_a = path_slug(&a);
+        let slug_b = path_slug(&b);
+
+        // Both keep the human-readable basename prefix…
+        assert!(slug_a.starts_with("crm-backend-"), "got {slug_a}");
+        assert!(slug_b.starts_with("crm-backend-"), "got {slug_b}");
+        // …but resolve to DISTINCT env names (no collision).
+        assert_ne!(slug_a, slug_b);
+
+        // Stable: the same path yields the same slug on a second call.
+        assert_eq!(slug_a, path_slug(&a));
+    }
+
+    /// `kong use` resolution: `resolve_project_name` honors `rules.project` when a
+    /// kong.rules is present, and falls back to the path slug otherwise.
+    #[test]
+    fn resolve_project_name_honors_rules_then_falls_back() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let proj = tmp.path().join("widget");
+        std::fs::create_dir_all(&proj).unwrap();
+
+        // No kong.rules yet → falls back to the path slug.
+        let fallback = resolve_project_name(&proj);
+        assert_eq!(fallback, path_slug(&proj));
+
+        // Write a kong.rules whose `project` is a custom recorded name.
+        let rules = KongRules {
+            version: 1,
+            project: "recorded-env-name".to_string(),
+            generated: "2026-01-01T00:00:00Z".to_string(),
+            runtimes: None,
+            python: None,
+            node: None,
+            rust: None,
+            brew: None,
+            scripts: HashMap::new(),
+            services: Vec::new(),
+        };
+        write_rules(&rules, &proj.join("kong.rules")).unwrap();
+
+        // Now resolution returns exactly what `kong use` would key the env by.
+        assert_eq!(resolve_project_name(&proj), "recorded-env-name");
     }
 }

@@ -52,6 +52,12 @@ pub struct RulesCmd {
     /// Path to project directory (defaults to current directory)
     #[arg(short, long)]
     pub path: Option<PathBuf>,
+
+    /// Override the project/env name (default: a path-unique slug of this folder).
+    /// This name is recorded in kong.rules and used as the RULEZ env directory, so
+    /// two folders sharing a basename never collide on one shared env.
+    #[arg(short, long)]
+    pub name: Option<String>,
 }
 
 #[derive(Parser)]

@@ -164,16 +164,14 @@ fn main() -> Result<()> {
 
             // Auto-run `kong rules` + `kong use` in the cloned directory.
             info!("Running `kong rules`…");
-            let rules = config::generate_rules(&dest, false)?;
+            let rules = config::generate_rules(&dest, false, None)?;
             let rules_path = dest.join("kong.rules");
             config::write_rules(&rules, &rules_path)?;
             info!(path = %rules_path.display(), "kong.rules written");
 
             info!("Running `kong use`…");
-            let project_name = dest
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "project".to_string());
+            // Key the env by the name `kong rules` just recorded (path-unique slug).
+            let project_name = rules.project.clone();
             let env_dir = store::rulez_dir(&project_name)?;
 
             if let Some(ref py) = rules.python {
@@ -196,7 +194,7 @@ fn main() -> Result<()> {
         Commands::Rules(cmd) => {
             let project_dir = cmd.path.unwrap_or_else(|| std::env::current_dir().unwrap());
             info!(path = %project_dir.display(), "Generating kong.rules");
-            let rules = config::generate_rules(&project_dir, cmd.force)?;
+            let rules = config::generate_rules(&project_dir, cmd.force, cmd.name)?;
             let rules_path = project_dir.join("kong.rules");
             config::write_rules(&rules, &rules_path)?;
             info!(path = %rules_path.display(), "kong.rules written");
@@ -213,11 +211,17 @@ fn main() -> Result<()> {
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new("."));
 
-            // Derive project name from the directory containing kong.rules.
-            let project_name = project_dir
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "project".to_string());
+            // Read the rules FIRST: the env location is keyed by the `project`
+            // field recorded by `kong rules` (a path-unique slug, or a `--name`
+            // override), NOT by the bare directory basename. This is what stops
+            // two folders that share a basename from collapsing onto one env.
+            let rules = config::read_rules(&cmd.rules_path)?;
+            let project_name = if rules.project.trim().is_empty() {
+                // Back-compat: a pre-existing kong.rules with no project recorded.
+                config::resolve_project_name(project_dir)
+            } else {
+                rules.project.clone()
+            };
 
             // Environments live in C:\kong\RULEZ\<project_name>\ so that hard
             // links from the store (same drive) always work, regardless of which
@@ -234,8 +238,6 @@ fn main() -> Result<()> {
                     return Ok(());
                 }
             }
-
-            let rules = config::read_rules(&cmd.rules_path)?;
 
             if let Some(ref py) = rules.python {
                 python::venv::build_venv(&env_dir, py, &store::store_root()?, &rules)?;
@@ -311,17 +313,15 @@ fn main() -> Result<()> {
 
             // ── 2. Rules ─────────────────────────────────────────────────
             info!("[2/4] Generating kong.rules");
-            let rules = config::generate_rules(&dest, false)?;
+            let rules = config::generate_rules(&dest, false, None)?;
             let rules_path = dest.join("kong.rules");
             config::write_rules(&rules, &rules_path)?;
             info!(path = %rules_path.display(), "kong.rules written");
 
             // ── 3. Use ───────────────────────────────────────────────────
             info!("[3/4] Setting up environments");
-            let project_name = dest
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "project".to_string());
+            // Key the env by the name `kong rules` just recorded (path-unique slug).
+            let project_name = rules.project.clone();
             let env_dir = store::rulez_dir(&project_name)?;
 
             if let Some(ref py) = rules.python {
@@ -430,10 +430,8 @@ fn main() -> Result<()> {
         Commands::Delete(cmd) => {
             let project_dir = cmd.path
                 .unwrap_or_else(|| std::env::current_dir().unwrap());
-            let project_name = project_dir
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "project".to_string());
+            // Resolve the SAME env name `kong use` created (rules.project, else slug).
+            let project_name = config::resolve_project_name(&project_dir);
             let env_dir = store::rulez_dir(&project_name)?;
             info!(project = %project_name, "Deleting KONG environment");
             link::clean_environments(&env_dir)?;

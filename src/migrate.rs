@@ -24,10 +24,10 @@ use crate::store;
 /// still be fetched.
 pub fn import_project(project_dir: &Path) -> Result<()> {
     let store_root = store::store_root()?;
-    let project_name = project_dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "project".to_string());
+    // Path-unique env name for THIS folder (generate_rules may run in a shadow
+    // temp dir, so we derive the name from the real project_dir and stamp it
+    // onto rules.project below — keeping every command's env-name in agreement).
+    let project_name = config::path_slug(project_dir);
 
     info!(project = %project_name, "Importing existing project into KONG");
 
@@ -59,6 +59,10 @@ pub fn import_project(project_dir: &Path) -> Result<()> {
         info!(count = section.packages.len(), "Node packages adopted from install (copied, not re-downloaded)");
         rules.node = Some(section);
     }
+
+    // Stamp the path-unique name (generate_rules may have keyed it to the shadow
+    // temp dir) so `use`/`run`/`delete` all resolve the same RULEZ env.
+    rules.project = project_name.clone();
 
     let rules_path = project_dir.join("kong.rules");
     config::write_rules(&rules, &rules_path)?;
@@ -117,7 +121,7 @@ fn generate_rules_skipping(
     skip_node: bool,
 ) -> Result<KongRules> {
     if !skip_python && !skip_node {
-        return config::generate_rules(project_dir, false);
+        return config::generate_rules(project_dir, false, None);
     }
 
     // Build a shadow project dir: hard-link/copy everything except the
@@ -159,7 +163,7 @@ fn generate_rules_skipping(
         }
     }
 
-    config::generate_rules(shadow.path(), false)
+    config::generate_rules(shadow.path(), false, None)
 }
 
 /// Make sure `rules.runtimes.python` points at a usable runtime so `build_venv`
@@ -446,10 +450,11 @@ pub fn solidify_project(project_dir: &Path) -> Result<()> {
     let rules = config::read_rules(&rules_path)
         .context("kong.rules not found — is this a KONG-managed project?")?;
     let store_root = store::store_root()?;
-    let project_name = project_dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "project".to_string());
+    let project_name = if rules.project.trim().is_empty() {
+        config::resolve_project_name(project_dir)
+    } else {
+        rules.project.clone()
+    };
 
     info!(project = %project_name, "Solidifying project (copying from store to local)");
 
@@ -722,10 +727,11 @@ pub fn eject_project(project_dir: &Path) -> Result<()> {
     let rules = config::read_rules(&rules_path)
         .context("kong.rules not found — is this a KONG-managed project?")?;
     let store_root = store::store_root()?;
-    let project_name = project_dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "project".to_string());
+    let project_name = if rules.project.trim().is_empty() {
+        config::resolve_project_name(project_dir)
+    } else {
+        rules.project.clone()
+    };
 
     info!(project = %project_name, "Ejecting project from KONG");
 

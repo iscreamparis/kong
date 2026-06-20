@@ -851,7 +851,7 @@ fn run_clone_flow(
     push_clone_log(window, "[2] Generating kong.rules...");
     window.set_status_message(SharedString::from("Generating rules..."));
 
-    let rules = config::generate_rules(&dest, false)?;
+    let rules = config::generate_rules(&dest, false, None)?;
     let rules_path = dest.join("kong.rules");
     config::write_rules(&rules, &rules_path)?;
     push_clone_log(window, "  ✓ kong.rules written");
@@ -865,10 +865,8 @@ fn run_clone_flow(
     push_clone_log(window, "[3] Setting up environments...");
     window.set_status_message(SharedString::from("Installing environments..."));
 
-    let project_name = dest
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "project".to_string());
+    // Key the env by the name `kong rules` just recorded (path-unique slug).
+    let project_name = rules.project.clone();
     let env_dir = store::rulez_dir(&project_name)?;
     let store_root = store::store_root()?;
 

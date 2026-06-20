@@ -42,10 +42,13 @@ pub fn run(script: &str, args: &[String], project_dir: &Path, no_build: bool) ->
         .with_context(|| format!("script '{script}' not found in kong.rules or package.json"))?;
 
     // ── Derive project name ──────────────────────────────────────────────────
-    let project_name = project_dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "project".to_string());
+    // Use the env name `kong use` created (rules.project), falling back to a
+    // path-unique slug so a project without a recorded name still resolves
+    // consistently with the other commands.
+    let project_name = match rules.as_ref() {
+        Some(r) if !r.project.trim().is_empty() => r.project.clone(),
+        _ => crate::config::resolve_project_name(project_dir),
+    };
 
     let env_dir = store::rulez_dir(&project_name)?;
     let store_root = store::store_root()?;
