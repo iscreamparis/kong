@@ -29,11 +29,11 @@ pnpm proved this model works for Node.js. KONG extends it to all three ecosystem
 
 ### Windows
 
-Download **[Kong-0.8.3-windows-x64-setup.exe](https://github.com/iscreamparis/kong/releases/download/v0.8.3/Kong-0.8.3-windows-x64-setup.exe)** from the [Releases page](https://github.com/iscreamparis/kong/releases) and run it. It drops `kong.exe` into `C:\kong\`, creates the store directory, and adds it to your system PATH.
+Download **[Kong-windows-x64-setup.exe](https://github.com/iscreamparis/kong/releases/latest/download/Kong-windows-x64-setup.exe)** from the [Releases page](https://github.com/iscreamparis/kong/releases/latest) and run it. It drops `kong.exe` into `C:\kong\`, creates the store directory, and adds it to your system PATH.
 
 ### macOS
 
-Download **[Kong-0.8.3-macos-arm64.dmg](https://github.com/iscreamparis/kong/releases/download/v0.8.3/Kong-0.8.3-macos-arm64.dmg)** from the [Releases page](https://github.com/iscreamparis/kong/releases). Drag `Kong.app` to Applications, then right-click → Open to bypass Gatekeeper on first launch.
+Download **[Kong-macos-arm64.dmg](https://github.com/iscreamparis/kong/releases/latest/download/Kong-macos-arm64.dmg)** from the [Releases page](https://github.com/iscreamparis/kong/releases/latest). Drag `Kong.app` to Applications, then right-click → Open to bypass Gatekeeper on first launch.
 
 <details>
 <summary>Build from source</summary>
@@ -51,12 +51,12 @@ The store lives at `~/Library/Application Support/kong/`. On macOS, KONG uses sy
 
 ### Linux
 
-Download **[Kong-0.8.3-linux-x64.tar.gz](https://github.com/iscreamparis/kong/releases/download/v0.8.3/Kong-0.8.3-linux-x64.tar.gz)** from the [Releases page](https://github.com/iscreamparis/kong/releases), extract it, and put `kong` on your PATH:
+Download **[Kong-linux-x64.tar.gz](https://github.com/iscreamparis/kong/releases/latest/download/Kong-linux-x64.tar.gz)** from the [Releases page](https://github.com/iscreamparis/kong/releases/latest), extract it, and put `kong` on your PATH:
 
 ```bash
-curl -fsSL -o Kong-0.8.3-linux-x64.tar.gz \
-  https://github.com/iscreamparis/kong/releases/download/v0.8.3/Kong-0.8.3-linux-x64.tar.gz
-tar -xzf Kong-0.8.3-linux-x64.tar.gz
+curl -fsSL -o Kong-linux-x64.tar.gz \
+  https://github.com/iscreamparis/kong/releases/latest/download/Kong-linux-x64.tar.gz
+tar -xzf Kong-linux-x64.tar.gz
 chmod +x kong
 mkdir -p ~/.local/bin && mv kong ~/.local/bin/   # ensure ~/.local/bin is on $PATH
 kong --version
