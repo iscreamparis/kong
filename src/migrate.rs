@@ -363,6 +363,21 @@ fn solidify_python(
         debug!(pkg = %pkg.name, "Copied into .venv");
     }
 
+    // Materialize console-script launchers (uvicorn, gunicorn, …) so a
+    // solidified project can still run its service. Shebang points at this
+    // venv's own python — fully general, discovered from installed metadata.
+    #[cfg(windows)]
+    let (bin_dir, venv_python) = (
+        venv_dir.join("Scripts"),
+        venv_dir.join("Scripts").join("python.exe"),
+    );
+    #[cfg(not(windows))]
+    let (bin_dir, venv_python) = (
+        venv_dir.join("bin"),
+        venv_dir.join("bin").join("python"),
+    );
+    crate::python::entry_points::generate_console_scripts(&site_packages, &bin_dir, &venv_python)?;
+
     Ok(())
 }
 
@@ -447,7 +462,7 @@ pub fn eject_project(project_dir: &Path) -> Result<()> {
     // ── 4. Remove RULEZ directory ───────────────────────────────────────
     let env_dir = store::rulez_dir(&project_name)?;
     if env_dir.exists() {
-        link::clean_environments(&env_dir)?;
+        link::clean_environments(&env_dir, /* keep_venv */ false)?;
         std::fs::remove_dir_all(&env_dir)
             .with_context(|| format!("failed to remove RULEZ dir: {}", env_dir.display()))?;
         info!("  ✓ Removed RULEZ directory");

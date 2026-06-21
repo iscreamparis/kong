@@ -622,6 +622,7 @@ mod tests {
             rust: None,
             brew: None,
             scripts: HashMap::new(),
+            services: Vec::new(),
         };
 
         let json = serde_json::to_string_pretty(&rules).unwrap();

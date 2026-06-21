@@ -213,10 +213,18 @@ fn main() -> Result<()> {
             info!(env_dir = %env_dir.display(), "Environments will be created in RULEZ");
 
             if cmd.clean {
-                link::clean_environments(&env_dir)?;
-                // Also remove project-dir junctions/symlinks
-                link::clean_project_junctions(project_dir)?;
-                if !cmd.rules_path.exists() {
+                if cmd.rules_path.exists() {
+                    // A rebuild follows: keep `.venv` so the live env is never
+                    // stranded — the venv builder rebuilds in a temp dir and
+                    // atomically swaps it in, GC-ing the old env AFTER the swap.
+                    // The project-dir `.venv` junction points at the stable env
+                    // path, so it does not need removing/recreating either.
+                    link::clean_environments(&env_dir, /* keep_venv */ true)?;
+                } else {
+                    // Pure `kong use --clean` with no rules to rebuild from →
+                    // a real teardown: remove everything including `.venv`.
+                    link::clean_environments(&env_dir, /* keep_venv */ false)?;
+                    link::clean_project_junctions(project_dir)?;
                     info!("Clean complete");
                     return Ok(());
                 }
@@ -412,7 +420,7 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|| "project".to_string());
             let env_dir = store::rulez_dir(&project_name)?;
             info!(project = %project_name, "Deleting KONG environment");
-            link::clean_environments(&env_dir)?;
+            link::clean_environments(&env_dir, /* keep_venv */ false)?;
             link::clean_project_junctions(&project_dir)?;
             if env_dir.exists() {
                 std::fs::remove_dir_all(&env_dir)?;

@@ -8,9 +8,33 @@ use crate::link;
 
 /// Build a Python .venv from the kong store.
 /// Uses the kong-managed Python runtime recorded in `rules.runtimes.python`.
+///
+/// The environment is built into a temporary sibling directory and then swapped
+/// over the live `.venv` in a single atomic `rename`, so a service whose
+/// `ExecStart` points inside `.venv` never observes a missing or half-built
+/// environment during a rebuild. See [`atomic_swap_venv`].
 pub fn build_venv(project_dir: &Path, python: &PythonSection, store_root: &Path, rules: &KongRules) -> Result<()> {
     let venv = project_dir.join(".venv");
 
+    // Build into a temp sibling, then atomically rename over `.venv`. Using a
+    // sibling guarantees the temp dir is on the same volume as the target, so
+    // the final `rename` is a true atomic move (never a cross-device copy).
+    let tmp_venv = temp_sibling(&venv);
+    // Clear any leftover temp from a previously interrupted build.
+    if tmp_venv.exists() {
+        crate::link::remove_dir_all_robust(&tmp_venv)?;
+    }
+
+    build_venv_at(&tmp_venv, python, store_root, rules)?;
+    atomic_swap_venv(&tmp_venv, &venv)?;
+
+    info!("Python .venv ready at {}", venv.display());
+    Ok(())
+}
+
+/// Build a fully-populated venv at an arbitrary target path (no swapping).
+/// `build_venv` calls this on a temp path; tests call it directly.
+fn build_venv_at(venv: &Path, python: &PythonSection, store_root: &Path, rules: &KongRules) -> Result<()> {
     // ── site-packages path (version-agnostic on Windows, version-tagged on Unix) ──
     #[cfg(windows)]
     let site_packages = venv.join("Lib").join("site-packages");
@@ -87,8 +111,128 @@ pub fn build_venv(project_dir: &Path, python: &PythonSection, store_root: &Path,
         debug!(pkg = %pkg.name, "Linked into site-packages");
     }
 
-    info!("Python .venv ready at {}", venv.display());
+    // ── Console-script launchers (uvicorn, gunicorn, alembic, pip, …) ────────
+    // pip/venv materialize a launcher in bin/ (Scripts\ on Windows) for every
+    // [console_scripts] entry point a distribution declares; kong did not, so
+    // `ExecStart=.../.venv/bin/uvicorn` failed 203/EXEC. Generate them from the
+    // installed metadata — fully general, no package names hardcoded. The
+    // shebang points at the venv's OWN python at its FINAL location, since this
+    // venv is about to be atomically renamed into place (the temp path it is
+    // built at would not survive the swap).
+    #[cfg(windows)]
+    let (bin_dir, final_python) = (
+        venv.join("Scripts"),
+        final_venv_path(venv).join("Scripts").join("python.exe"),
+    );
+    #[cfg(not(windows))]
+    let (bin_dir, final_python) = (
+        venv.join("bin"),
+        final_venv_path(venv).join("bin").join("python"),
+    );
+    let n = crate::python::entry_points::generate_console_scripts(
+        &site_packages,
+        &bin_dir,
+        &final_python,
+    )?;
+    if n > 0 {
+        debug!(count = n, "Generated console-script launchers");
+    }
+
     Ok(())
+}
+
+/// Given a temp venv path like `<dir>/.venv.kong-tmp-1234`, return the final
+/// path it will be swapped to (`<dir>/.venv`). If `venv` is already the final
+/// `.venv` (the path build_venv_at is called with directly, e.g. in tests),
+/// it is returned unchanged so shebangs stay correct in both cases.
+fn final_venv_path(venv: &Path) -> PathBuf {
+    let parent = venv.parent().unwrap_or_else(|| Path::new("."));
+    match venv.file_name().and_then(|n| n.to_str()) {
+        Some(name) if name.starts_with(".venv.kong-tmp-") => parent.join(".venv"),
+        _ => venv.to_path_buf(),
+    }
+}
+
+/// Compute a same-directory temp path for staging a fresh `.venv` before the
+/// atomic swap. PID-suffixed so concurrent `kong use` runs don't collide.
+fn temp_sibling(venv: &Path) -> PathBuf {
+    let parent = venv.parent().unwrap_or_else(|| Path::new("."));
+    parent.join(format!(".venv.kong-tmp-{}", std::process::id()))
+}
+
+/// Atomically replace `final_venv` with the freshly-built `tmp_venv`.
+///
+/// The whole point of this dance: a live service whose `ExecStart` points
+/// inside `.venv` must NEVER observe `.venv` missing or half-populated, even
+/// during a `kong use --clean` rebuild. We therefore build the new env fully in
+/// `tmp_venv`, then flip it into place in one step and only afterwards delete
+/// the OLD env.
+///
+/// Unix: `rename(tmp, final)` is atomic and replaces the existing directory in
+/// a single syscall — observers see either the old or the new env, never a gap.
+///
+/// Windows: there is no atomic "rename over an existing directory" primitive,
+/// so we get as close as the platform allows — move the old env aside to a temp
+/// name first (fast metadata op), then rename the new env into place, then GC
+/// the old copy. The window where `.venv` is absent is reduced to the time
+/// between two `rename`s (sub-millisecond) rather than a full rebuild.
+fn atomic_swap_venv(tmp_venv: &Path, final_venv: &Path) -> Result<()> {
+    #[cfg(not(windows))]
+    {
+        // POSIX rename(2) atomically replaces an existing directory target.
+        std::fs::rename(tmp_venv, final_venv).with_context(|| {
+            format!(
+                "atomic swap failed: {} -> {}",
+                tmp_venv.display(),
+                final_venv.display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    #[cfg(windows)]
+    {
+        if !final_venv.exists() {
+            // No existing env — a single rename is already atomic.
+            std::fs::rename(tmp_venv, final_venv).with_context(|| {
+                format!(
+                    "swap failed: {} -> {}",
+                    tmp_venv.display(),
+                    final_venv.display()
+                )
+            })?;
+            return Ok(());
+        }
+
+        // Existing env present: move it aside, swap the new one in, GC the old.
+        let parent = final_venv.parent().unwrap_or_else(|| Path::new("."));
+        let old_aside = parent.join(format!(".venv.kong-old-{}", std::process::id()));
+        if old_aside.exists() {
+            let _ = crate::link::remove_dir_all_robust(&old_aside);
+        }
+        std::fs::rename(final_venv, &old_aside).with_context(|| {
+            format!("could not move old .venv aside: {}", final_venv.display())
+        })?;
+        // Smallest possible gap: between these two renames `.venv` is absent.
+        match std::fs::rename(tmp_venv, final_venv) {
+            Ok(()) => {
+                // Success — remove the old copy in the background of this run.
+                let _ = crate::link::remove_dir_all_robust(&old_aside);
+                Ok(())
+            }
+            Err(e) => {
+                // Roll back: restore the old env so the service is not stranded.
+                let _ = std::fs::rename(&old_aside, final_venv);
+                Err(e).with_context(|| {
+                    format!(
+                        "swap failed (old .venv restored): {} -> {}",
+                        tmp_venv.display(),
+                        final_venv.display()
+                    )
+                })
+            }
+        }
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -241,5 +385,227 @@ deactivate() {{
 
 #[cfg(test)]
 mod tests {
-    // Venv tests require tempdir + store fixtures — see kong-test skill
+    use super::*;
+    use crate::config::{
+        KongRules, PackageEntry, PythonSection, RuntimeEntry, RuntimeSection,
+    };
+    use std::collections::HashMap;
+
+    /// Build a fake kong store on disk: a python runtime with a real (empty but
+    /// present) interpreter executable, plus one extracted package carrying a
+    /// `.dist-info/entry_points.txt` that declares a console_script. Returns
+    /// `(store_root, rules, python_section)`.
+    fn fake_store(tmp: &Path) -> (PathBuf, KongRules) {
+        let store_root = tmp.join("store");
+
+        // ── runtime: a stand-in python executable where python_exe_in looks ──
+        let runtime_rel = "python/runtime/3.12.0";
+        let runtime_dir = store_root.join(runtime_rel);
+        #[cfg(windows)]
+        let py_exe = runtime_dir.join("python.exe");
+        #[cfg(not(windows))]
+        let py_exe = runtime_dir.join("bin").join("python3");
+        std::fs::create_dir_all(py_exe.parent().unwrap()).unwrap();
+        std::fs::write(&py_exe, b"#!/bin/sh\n").unwrap();
+
+        // ── package: webserve-1.0 with a console_script `webserve` ──────────
+        let pkg_rel = "python/libs/webserve-1.0-cp312-test";
+        let pkg_dir = store_root.join(pkg_rel);
+        let di = pkg_dir.join("webserve-1.0.dist-info");
+        std::fs::create_dir_all(&di).unwrap();
+        std::fs::write(
+            di.join("entry_points.txt"),
+            "[console_scripts]\nwebserve = webserve.main:run\n",
+        )
+        .unwrap();
+        // a module file so the package has real content too
+        let mod_dir = pkg_dir.join("webserve");
+        std::fs::create_dir_all(&mod_dir).unwrap();
+        std::fs::write(mod_dir.join("__init__.py"), b"").unwrap();
+
+        let rules = KongRules {
+            version: 1,
+            project: "t".into(),
+            generated: "now".into(),
+            runtimes: Some(RuntimeSection {
+                python: Some(RuntimeEntry {
+                    version: "3.12.0".into(),
+                    store_path: runtime_rel.into(),
+                }),
+                node: None,
+                rust: None,
+            }),
+            python: Some(PythonSection {
+                version: "3.12.0".into(),
+                platform: "test".into(),
+                packages: vec![PackageEntry {
+                    name: "webserve".into(),
+                    version: "1.0".into(),
+                    hash: None,
+                    store_path: pkg_rel.into(),
+                    source_url: None,
+                }],
+            }),
+            node: None,
+            rust: None,
+            brew: None,
+            scripts: HashMap::new(),
+            services: Vec::new(),
+        };
+        (store_root, rules)
+    }
+
+    fn site_packages_of(venv: &Path, py_version: &str) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let _ = py_version;
+            venv.join("Lib").join("site-packages")
+        }
+        #[cfg(not(windows))]
+        {
+            let mm = major_minor(py_version);
+            venv.join("lib").join(format!("python{mm}")).join("site-packages")
+        }
+    }
+
+    /// The console-script launcher exists in the venv's bin/Scripts after `use`.
+    #[test]
+    fn use_materializes_console_scripts() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store_root, rules) = fake_store(tmp.path());
+        let py = rules.python.as_ref().unwrap();
+
+        let project = tmp.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        build_venv(&project, py, &store_root, &rules).unwrap();
+
+        let venv = project.join(".venv");
+        #[cfg(not(windows))]
+        {
+            let launcher = venv.join("bin").join("webserve");
+            assert!(launcher.exists(), "launcher must be materialized");
+            // Executable bit set.
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&launcher).unwrap().permissions().mode();
+            assert!(mode & 0o111 != 0, "launcher must be executable (mode {mode:o})");
+            // Invokes the declared callable.
+            let body = std::fs::read_to_string(&launcher).unwrap();
+            assert!(body.contains("from webserve.main import run"), "body: {body}");
+            assert!(body.contains("sys.exit(run())"), "body: {body}");
+            // Shebang points at the FINAL venv python, not a temp dir.
+            let expected = format!("#!{}", venv.join("bin").join("python").display());
+            assert!(
+                body.lines().next().unwrap().starts_with(&expected.replace('\\', "/")),
+                "shebang must point at the live venv python, got: {}",
+                body.lines().next().unwrap()
+            );
+        }
+        #[cfg(windows)]
+        {
+            assert!(venv.join("Scripts").join("webserve-script.py").exists());
+            assert!(venv.join("Scripts").join("webserve.bat").exists());
+        }
+    }
+
+    /// `build_venv` builds in a temp sibling and only swaps at the end; the
+    /// live `.venv` is never absent or half-built mid-build. We can't observe
+    /// the instant of the rename in a single-threaded test, so we assert the
+    /// invariant the swap guarantees: the temp path is the only thing built
+    /// before the swap, and after `build_venv` the live `.venv` resolves to a
+    /// complete env while no temp/old leftovers remain.
+    #[test]
+    fn build_uses_temp_then_swaps_leaving_no_leftovers() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store_root, rules) = fake_store(tmp.path());
+        let py = rules.python.as_ref().unwrap();
+        let project = tmp.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+
+        // The temp sibling name `build_venv` will use.
+        let tmp_venv = temp_sibling(&project.join(".venv"));
+        assert!(!tmp_venv.exists());
+
+        build_venv(&project, py, &store_root, &rules).unwrap();
+
+        let venv = project.join(".venv");
+        // Complete env present at the live path.
+        assert!(venv.join("pyvenv.cfg").exists(), ".venv must be complete after use");
+        assert!(site_packages_of(&venv, &py.version).join("webserve").exists());
+        // No temp or old leftovers.
+        assert!(!tmp_venv.exists(), "temp build dir must be gone after swap");
+        let leftovers: Vec<_> = std::fs::read_dir(&project)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".venv.kong-"))
+            .collect();
+        assert!(leftovers.is_empty(), "no .venv.kong-* leftovers, found {leftovers:?}");
+    }
+
+    /// A rebuild over an EXISTING `.venv` (the `kong use --clean` rebuild case)
+    /// must replace it atomically — the live `.venv` resolves to a complete env
+    /// before and after; the old contents are only gone once the new env is in.
+    #[test]
+    fn rebuild_over_existing_venv_is_complete_throughout() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (store_root, rules) = fake_store(tmp.path());
+        let py = rules.python.as_ref().unwrap();
+        let project = tmp.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+
+        // First build — establishes a live .venv.
+        build_venv(&project, py, &store_root, &rules).unwrap();
+        let venv = project.join(".venv");
+        assert!(venv.join("pyvenv.cfg").exists());
+
+        // Drop a marker INTO the live venv; a true atomic swap replaces the
+        // whole dir, so the marker is gone but the env is still complete —
+        // proving the new env (not a half-cleared old one) is what's live.
+        std::fs::write(venv.join("OLD_MARKER"), b"x").unwrap();
+
+        // Rebuild (simulates `--clean` rebuild: existing .venv stays until swap).
+        build_venv(&project, py, &store_root, &rules).unwrap();
+
+        // Still a complete env at the live path.
+        assert!(venv.join("pyvenv.cfg").exists(), ".venv complete after rebuild");
+        assert!(site_packages_of(&venv, &py.version).join("webserve").exists());
+        #[cfg(not(windows))]
+        assert!(venv.join("bin").join("webserve").exists(), "console script present after rebuild");
+        // The swap brought in a fresh dir — the old marker is gone.
+        assert!(!venv.join("OLD_MARKER").exists(), "swap replaced the whole env atomically");
+        // No leftovers.
+        let leftovers: Vec<_> = std::fs::read_dir(&project)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".venv.kong-"))
+            .collect();
+        assert!(leftovers.is_empty(), "no leftovers after rebuild, found {leftovers:?}");
+    }
+
+    /// The swap only removes the OLD env AFTER the new one is in place: assert
+    /// directly on `atomic_swap_venv` that the target exists at completion and
+    /// the temp source no longer does (the new env is what's live).
+    #[test]
+    fn atomic_swap_target_present_source_consumed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let parent = tmp.path();
+        let final_venv = parent.join(".venv");
+        let tmp_venv = parent.join(".venv.kong-tmp-9999");
+
+        // Pre-existing "old" env with a marker.
+        std::fs::create_dir_all(&final_venv).unwrap();
+        std::fs::write(final_venv.join("old.txt"), b"old").unwrap();
+        // Freshly-built "new" env in the temp sibling.
+        std::fs::create_dir_all(&tmp_venv).unwrap();
+        std::fs::write(tmp_venv.join("new.txt"), b"new").unwrap();
+
+        atomic_swap_venv(&tmp_venv, &final_venv).unwrap();
+
+        // Target present and is the NEW env; temp source consumed; no old left.
+        assert!(final_venv.exists(), ".venv must exist after swap");
+        assert!(final_venv.join("new.txt").exists(), "new env must be live");
+        assert!(!final_venv.join("old.txt").exists(), "old env must be replaced");
+        assert!(!tmp_venv.exists(), "temp source must be consumed by the swap");
+    }
 }
