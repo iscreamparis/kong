@@ -5,6 +5,21 @@ All notable changes to KONG are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and KONG adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.4] — 2026-06-23
+
+### Fixed
+- **Atomic `.venv` repoint on `kong use`.** The venv builder now builds the
+  environment into a temporary sibling directory and swaps it over the live
+  `.venv` in a single `rename` (atomic on Unix; move-aside + rename + rollback
+  on Windows, sub-millisecond gap). `kong use --clean` keeps the existing
+  `.venv` during the rebuild (`clean_environments` gained a `keep_venv`
+  parameter) and garbage-collects the old environment only AFTER the swap. A
+  live service whose `ExecStart` points inside `.venv` therefore never observes
+  a missing or half-built environment during a rebuild — closing the 203/EXEC
+  window that could crash-loop a running service. Activation scripts and
+  console-script shebangs are baked with the FINAL `.venv` path, never the
+  temporary build path. Console-script generation (added in 0.8.1) is unchanged.
+
 ## [0.8.3] — 2026-06-19
 
 ### Fixed

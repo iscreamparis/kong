@@ -230,13 +230,17 @@ fn main() -> Result<()> {
             info!(env_dir = %env_dir.display(), "Environments will be created in RULEZ");
 
             if cmd.clean {
-                link::clean_environments(&env_dir)?;
-                // Also remove project-dir junctions/symlinks
-                link::clean_project_junctions(project_dir)?;
-                if !cmd.rules_path.exists() {
-                    info!("Clean complete");
-                    return Ok(());
-                }
+                // A rebuild always follows here (`rules` was read successfully
+                // above), so KEEP `.venv`: the venv builder rebuilds the env in
+                // a temp dir and atomically swaps it over the live `.venv`,
+                // GC-ing the old env only AFTER the swap. Pre-removing it would
+                // strand a live service whose `ExecStart` points inside `.venv`
+                // for the whole rebuild (the 203/EXEC class of failure). Other
+                // managed dirs (node_modules, cargo/toolchain config) are
+                // recreated outright, so clearing them first is fine. The
+                // project-dir `.venv` junction points at the stable env path,
+                // so it does not need removing/recreating either.
+                link::clean_environments(&env_dir, /* keep_venv */ true)?;
             }
 
             if let Some(ref py) = rules.python {
@@ -434,7 +438,7 @@ fn main() -> Result<()> {
             let project_name = config::resolve_project_name(&project_dir);
             let env_dir = store::rulez_dir(&project_name)?;
             info!(project = %project_name, "Deleting KONG environment");
-            link::clean_environments(&env_dir)?;
+            link::clean_environments(&env_dir, /* keep_venv */ false)?;
             link::clean_project_junctions(&project_dir)?;
             if env_dir.exists() {
                 std::fs::remove_dir_all(&env_dir)?;

@@ -763,7 +763,7 @@ pub fn eject_project(project_dir: &Path) -> Result<()> {
     // ── 4. Remove RULEZ directory ───────────────────────────────────────
     let env_dir = store::rulez_dir(&project_name)?;
     if env_dir.exists() {
-        link::clean_environments(&env_dir)?;
+        link::clean_environments(&env_dir, /* keep_venv */ false)?;
         std::fs::remove_dir_all(&env_dir)
             .with_context(|| format!("failed to remove RULEZ dir: {}", env_dir.display()))?;
         info!("  ✓ Removed RULEZ directory");

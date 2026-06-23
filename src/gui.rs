@@ -233,7 +233,7 @@ pub fn launch(project_dir: Option<&Path>) -> Result<()> {
                 // Clean RULEZ environment + project junctions
                 let env_dir = store::rulez_dir(&project_name).ok();
                 if let Some(ref ed) = env_dir {
-                    let _ = crate::link::clean_environments(ed);
+                    let _ = crate::link::clean_environments(ed, /* keep_venv */ false);
                 }
                 let _ = crate::link::clean_project_junctions(&proj_dir);
                 // Remove the RULEZ directory for this project

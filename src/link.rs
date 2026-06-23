@@ -202,9 +202,15 @@ pub fn clean_project_junctions(project_dir: &Path) -> Result<()> {
 }
 
 /// Remove virtual environments created by `kong use`.
-pub fn clean_environments(project_dir: &Path) -> Result<()> {
+///
+/// `keep_venv` leaves the Python `.venv` in place: `kong use --clean` passes
+/// `true` because the venv builder rebuilds the env in a temp dir and swaps it
+/// over the existing `.venv` atomically — pre-removing it here would strand a
+/// live service whose `ExecStart` points inside `.venv` for the whole rebuild.
+/// `kong delete` / `kong eject` pass `false` (no rebuild follows).
+pub fn clean_environments(project_dir: &Path, keep_venv: bool) -> Result<()> {
     let venv = project_dir.join(".venv");
-    if venv.exists() {
+    if venv.exists() && !keep_venv {
         debug!(path = %venv.display(), "Removing .venv");
         remove_dir_all_robust(&venv)?;
     }
