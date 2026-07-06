@@ -435,6 +435,7 @@ No pip. No npm. No brew. No conda. No rustup. Just KONG.
 - [x] **Wheel selection by target CPython/ABI tag** — picks the exact `cpXY` / `abi3` / `none` wheel for the managed interpreter and rejects a wrong CPython minor (e.g. won't pick a `cp313t` wheel for a `cp310` runtime)
 - [x] **`kong import` copy-adopts installed packages** — copies the existing `.venv` / `node_modules` into the store byte-for-byte (native extensions included), with no re-download or re-resolve
 - [x] **Robust import copy** — handles venv internals such as directory symlinks (`lib64 -> lib`) and dangling links
+- [x] **Directory-mode normalisation on extraction** (0.8.5) — `tar.gz` extraction now creates directories with a traversable mode (`0o755`) instead of preserving the tarball's recorded mode. Some npm tarballs ship directory entries as `0o666` (no execute/traverse bit — e.g. `pngjs` 5.0.0), which made the store dir non-traversable and caused a later `hard_link` into it to fail with `Permission denied (EACCES)`. npm / pnpm / yarn normalise dir modes for the same reason; kong now does too. File modes (executable bits) are preserved.
 
 ### v0.9 — Performance + broader compatibility
 - [ ] **Parallel downloads** — all packages fetched concurrently (currently sequential)
