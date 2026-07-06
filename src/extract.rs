@@ -42,6 +42,16 @@ pub fn extract_wheel(archive_path: &Path, dest: &Path) -> Result<()> {
 }
 
 /// Extract a .tgz / .tar.gz / .crate archive to a destination directory.
+///
+/// Directories are always created via `create_dir_all` (OS-default mode,
+/// 0o755 on Unix) rather than preserving the tar-recorded mode.  Some npm
+/// tarballs (e.g. pngjs 5.0.0) record directory entries with mode 0o666 — no
+/// execute/traverse bit.  `Archive::unpack` would preserve that verbatim,
+/// making those directories non-traversable and causing any subsequent
+/// `hard_link` into them to fail with EACCES (os error 13).  npm, pnpm, and
+/// yarn all normalise directory modes on extraction for the same reason; kong
+/// now does the same.  File modes are preserved as-is via `entry.unpack` so
+/// that executable bits on scripts and binaries are not disturbed.
 pub fn extract_targz(archive_path: &Path, dest: &Path) -> Result<()> {
     debug!(src = %archive_path.display(), dst = %dest.display(), "Extracting tar.gz");
 
@@ -51,9 +61,31 @@ pub fn extract_targz(archive_path: &Path, dest: &Path) -> Result<()> {
     let mut archive = tar::Archive::new(decompressed);
 
     std::fs::create_dir_all(dest)?;
-    archive
-        .unpack(dest)
-        .with_context(|| format!("failed to extract: {}", archive_path.display()))?;
+
+    for entry in archive
+        .entries()
+        .with_context(|| format!("failed to read archive entries: {}", archive_path.display()))?
+    {
+        let mut entry = entry
+            .with_context(|| format!("corrupt archive entry in: {}", archive_path.display()))?;
+        let raw_path = entry.path()?.to_path_buf();
+        let out = dest.join(&raw_path);
+
+        if entry.header().entry_type().is_dir() {
+            // Use create_dir_all so the OS assigns a traversable mode (0o755
+            // on Unix) rather than inheriting whatever the tar entry recorded.
+            std::fs::create_dir_all(&out)
+                .with_context(|| format!("failed to create dir: {}", out.display()))?;
+        } else {
+            if let Some(p) = out.parent() {
+                std::fs::create_dir_all(p)
+                    .with_context(|| format!("failed to create parent dir: {}", p.display()))?;
+            }
+            entry
+                .unpack(&out)
+                .with_context(|| format!("failed to unpack entry: {}", out.display()))?;
+        }
+    }
 
     info!(dest = %dest.display(), "tar.gz extracted");
     Ok(())
@@ -203,5 +235,136 @@ pub fn extract(archive_path: &Path, dest: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    // Extraction tests require real archive fixtures — see kong-test skill
+    use super::*;
+
+    /// Build an in-memory .tar.gz that reproduces the pngjs pattern:
+    /// a directory entry with mode 0o666 (no execute/traverse bit) containing
+    /// a regular file.
+    fn make_tar_gz_bad_dir_mode() -> Vec<u8> {
+        let buf = Vec::new();
+        let enc = flate2::write::GzEncoder::new(buf, flate2::Compression::default());
+        let mut ar = tar::Builder::new(enc);
+
+        // Directory entry with bad mode — no execute bit on any class
+        let mut hdr = tar::Header::new_gnu();
+        hdr.set_path("baddir/").unwrap();
+        hdr.set_mode(0o666);
+        hdr.set_entry_type(tar::EntryType::Directory);
+        hdr.set_size(0);
+        hdr.set_mtime(0);
+        hdr.set_uid(0);
+        hdr.set_gid(0);
+        hdr.set_cksum();
+        ar.append(&hdr, std::io::empty()).unwrap();
+
+        // Regular file inside the bad-mode directory
+        let content: &[u8] = b"hello from bad-mode dir";
+        let mut hdr = tar::Header::new_gnu();
+        hdr.set_path("baddir/file.txt").unwrap();
+        hdr.set_mode(0o644);
+        hdr.set_entry_type(tar::EntryType::Regular);
+        hdr.set_size(content.len() as u64);
+        hdr.set_mtime(0);
+        hdr.set_uid(0);
+        hdr.set_gid(0);
+        hdr.set_cksum();
+        ar.append(&hdr, content).unwrap();
+
+        ar.into_inner().unwrap().finish().unwrap()
+    }
+
+    /// Regression test for the pngjs-style "directory with mode 0o666" bug.
+    ///
+    /// Verifies that:
+    ///  1. `extract_targz` succeeds (no EACCES at extraction time).
+    ///  2. The extracted directory is owner-traversable (execute bit set) on
+    ///     Unix — regardless of the mode recorded in the tar entry.
+    ///  3. The file inside the directory is reachable and has the right content,
+    ///     proving that a subsequent `hard_link` would not fail with EACCES.
+    #[test]
+    fn extract_targz_normalises_bad_directory_mode() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        // Write the crafted archive to a temp file (extract_targz takes a Path)
+        let archive_path = tmp.path().join("bad_dir_mode.tar.gz");
+        std::fs::write(&archive_path, make_tar_gz_bad_dir_mode()).unwrap();
+
+        let dest = tmp.path().join("extracted");
+        extract_targz(&archive_path, &dest).expect("extract_targz must succeed");
+
+        // The file inside the formerly-bad-mode directory must be reachable
+        let file_path = dest.join("baddir").join("file.txt");
+        assert!(
+            file_path.exists(),
+            "file inside bad-mode dir must exist after extraction"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            "hello from bad-mode dir",
+            "file content must be intact"
+        );
+
+        // On Unix: the directory must now have the owner execute/traverse bit set.
+        // This is what was missing before the fix, and what caused EACCES on
+        // hard_link.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_path = dest.join("baddir");
+            let mode = std::fs::metadata(&dir_path).unwrap().permissions().mode();
+            assert!(
+                mode & 0o100 != 0,
+                "owner execute (traverse) bit must be set on extracted directory \
+                 (actual mode: {:#o}, tar-recorded mode was 0o666)",
+                mode
+            );
+        }
+    }
+
+    /// Verify that a well-formed tar.gz (normal 0o755 dirs) still extracts correctly.
+    #[test]
+    fn extract_targz_normal_archive_works() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        // Build a normal archive
+        let buf = Vec::new();
+        let enc = flate2::write::GzEncoder::new(buf, flate2::Compression::default());
+        let mut ar = tar::Builder::new(enc);
+
+        let mut hdr = tar::Header::new_gnu();
+        hdr.set_path("pkg/").unwrap();
+        hdr.set_mode(0o755);
+        hdr.set_entry_type(tar::EntryType::Directory);
+        hdr.set_size(0);
+        hdr.set_mtime(0);
+        hdr.set_uid(0);
+        hdr.set_gid(0);
+        hdr.set_cksum();
+        ar.append(&hdr, std::io::empty()).unwrap();
+
+        let content: &[u8] = b"normal content";
+        let mut hdr = tar::Header::new_gnu();
+        hdr.set_path("pkg/index.js").unwrap();
+        hdr.set_mode(0o644);
+        hdr.set_entry_type(tar::EntryType::Regular);
+        hdr.set_size(content.len() as u64);
+        hdr.set_mtime(0);
+        hdr.set_uid(0);
+        hdr.set_gid(0);
+        hdr.set_cksum();
+        ar.append(&hdr, content).unwrap();
+
+        let bytes = ar.into_inner().unwrap().finish().unwrap();
+
+        let archive_path = tmp.path().join("normal.tar.gz");
+        std::fs::write(&archive_path, bytes).unwrap();
+
+        let dest = tmp.path().join("out");
+        extract_targz(&archive_path, &dest).expect("normal archive must extract cleanly");
+
+        assert_eq!(
+            std::fs::read_to_string(dest.join("pkg").join("index.js")).unwrap(),
+            "normal content"
+        );
+    }
 }

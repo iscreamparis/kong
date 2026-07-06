@@ -5,6 +5,25 @@ All notable changes to KONG are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and KONG adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.5] — 2026-07-06
+
+### Fixed
+- **Directory mode normalisation on tar.gz extraction.** `extract_targz` now
+  creates extracted directories via `std::fs::create_dir_all` (OS-default mode,
+  `0o755` on Unix) instead of `Archive::unpack`, which preserved the
+  tar-recorded mode verbatim.  Some npm tarballs (e.g. `pngjs@5.0.0`) ship
+  directory entries with mode `0o666` — no execute/traverse bit.  With the old
+  code those directories were non-traversable by their owner, so a subsequent
+  `hard_link` into them failed with `Permission denied (os error 13)` even
+  though the store owner was the same user.  The fix matches the behaviour of
+  npm, pnpm, and yarn, which all normalise directory modes at extraction time.
+  File modes are preserved as-is (`entry.unpack`) so executable bits on
+  scripts and native binaries are not disturbed.  The fix applies uniformly to
+  all tar.gz sources (Node, Python wheels, Rust crates) — no
+  package-specific special-casing.  A regression test constructs an in-memory
+  archive with a `0o666` directory entry and asserts the extracted directory
+  has the owner execute bit set and its contents are reachable.
+
 ## [0.8.4] — 2026-06-23
 
 ### Fixed
@@ -92,6 +111,8 @@ and KONG adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Robust import copy.** Handles venv internals such as directory symlinks
   (`lib64 -> lib`) and dangling links.
 
+[0.8.5]: https://github.com/iscreamparis/kong/releases/tag/v0.8.5
+[0.8.4]: https://github.com/iscreamparis/kong/releases/tag/v0.8.4
 [0.8.3]: https://github.com/iscreamparis/kong/releases/tag/v0.8.3
 [0.8.2]: https://github.com/iscreamparis/kong/releases/tag/v0.8.2
 [0.8.1]: https://github.com/iscreamparis/kong/releases/tag/v0.8.1
