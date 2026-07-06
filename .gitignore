@@ -1,7 +1,10 @@
 # Rust
 /target/
 Cargo.lock
-build/
+# build/ holds generated installers (.exe) — ignore those, but KEEP the NSIS
+# source script tracked (same pattern as .github/* + !.github/workflows below).
+build/*
+!build/kong-installer.nsi
 
 # Release output
 /dist/
