@@ -142,13 +142,16 @@ pub fn resolve_latest_version(name: &str) -> Result<String> {
     Ok(resp.info.version)
 }
 
-/// List every release version string for a package from PyPI (the keys of the
-/// `releases` map), filtering out yanked-only releases (those whose every file
-/// is yanked have an empty file list and are skipped).
-pub fn list_versions(name: &str) -> Result<Vec<String>> {
+/// List every release of a package from PyPI, each with its published files,
+/// filtering out yanked-only releases (those whose every file is yanked have an
+/// empty file list and are skipped).
+///
+/// The files come back with the version because artifact availability decides
+/// whether a version is even a candidate — see `resolve_best_version`.
+fn list_releases(name: &str) -> Result<Vec<(String, Vec<PypiFileEntry>)>> {
     #[derive(Deserialize)]
     struct Response {
-        releases: std::collections::HashMap<String, Vec<serde_json::Value>>,
+        releases: std::collections::HashMap<String, Vec<PypiFileEntry>>,
     }
 
     let url = format!("https://pypi.org/pypi/{name}/json");
@@ -158,32 +161,83 @@ pub fn list_versions(name: &str) -> Result<Vec<String>> {
         .with_context(|| format!("failed to parse PyPI response for {name}"))?;
 
     // A release with no files has been fully removed/never-published — skip it.
-    let versions: Vec<String> = resp
+    Ok(resp
         .releases
         .into_iter()
         .filter(|(_, files)| !files.is_empty())
-        .map(|(v, _)| v)
-        .collect();
-    Ok(versions)
+        .collect())
 }
 
-/// Resolve the highest PyPI version of `name` that satisfies `spec`.
+/// The subset of `releases` that publish a wheel usable by the target interpreter.
+///
+/// Platform tags are passed in so this is host-independent and unit-testable, the
+/// same way `select_best_file_for` is. A release offering only an sdist is excluded:
+/// whether that sdist is pure-Python or compiled cannot be known without unpacking
+/// it, so it is not treated as a candidate while a wheel-shipping release exists.
+fn installable_versions(
+    releases: &[(String, Vec<PypiFileEntry>)],
+    target_py_tag: &str,
+    platform_tag: &str,
+    arch_suffix: &str,
+) -> Vec<String> {
+    releases
+        .iter()
+        .filter(|(_, files)| {
+            matches!(select_best_file_for(files, target_py_tag, platform_tag, arch_suffix),
+                     Some(f) if !is_sdist(f))
+        })
+        .map(|(v, _)| v.clone())
+        .collect()
+}
+
+/// Resolve the highest PyPI version of `name` that satisfies `spec` AND that kong
+/// can actually install for `target_py_tag`.
 ///
 /// This is the core from-scratch resolver: instead of taking the global latest,
 /// we list every released version and pick the highest one matching the PEP 440
 /// specifier set. An empty specifier means "no constraint" → the latest stable.
+///
+/// Version choice is **artifact-aware**. A release whose only artifact is a
+/// COMPILED sdist cannot be installed (kong ships no C toolchain — see
+/// `sdist::install_sdist`), so selecting it strands the build even though an
+/// older, wheel-shipping release would satisfy the same specifier. We therefore
+/// prefer the highest satisfying version that publishes a wheel compatible with
+/// the target interpreter, and only consider wheel-less releases when NO version
+/// in range ships one — which is the normal case for pure-Python packages that
+/// publish an sdist alone, and those install fine.
+///
 /// If nothing satisfies (a genuine conflict / impossible bound) we warn and fall
 /// back to the global latest so provisioning degrades rather than aborting.
-pub fn resolve_best_version(name: &str, spec: &crate::python::pep440::SpecifierSet) -> Result<String> {
+pub fn resolve_best_version(
+    name: &str,
+    spec: &crate::python::pep440::SpecifierSet,
+    target_py_tag: &str,
+) -> Result<String> {
     // An exact `==` pin needs no version listing — honor it directly.
     if let Some(pin) = spec.exact_pin() {
         debug!(pkg = %name, ver = %pin, "Exact pin — using as-is");
         return Ok(pin);
     }
 
-    let versions = list_versions(name)?;
-    if let Some(best) = crate::python::pep440::select_best(&versions, spec) {
-        debug!(pkg = %name, ver = %best, "Selected highest version satisfying specifier");
+    let releases = list_releases(name)?;
+    let installable = installable_versions(
+        &releases,
+        target_py_tag,
+        &current_platform_tag(),
+        &current_arch_suffix(),
+    );
+
+    if let Some(best) = crate::python::pep440::select_best(&installable, spec) {
+        debug!(pkg = %name, ver = %best, "Selected highest wheel-shipping version satisfying specifier");
+        return Ok(best.to_string());
+    }
+
+    // No release in range ships a usable wheel. Fall back to the highest satisfying
+    // version regardless of artifact: a pure-Python sdist installs fine, and a
+    // compiled one fails LOUDLY in install_sdist rather than silently degrading.
+    let all: Vec<String> = releases.into_iter().map(|(v, _)| v).collect();
+    if let Some(best) = crate::python::pep440::select_best(&all, spec) {
+        debug!(pkg = %name, ver = %best, "No wheel in range — selected highest satisfying version (sdist path)");
         return Ok(best.to_string());
     }
 
@@ -639,6 +693,55 @@ mod tests {
 
     fn target(tag: &str) -> TargetTag {
         TargetTag::parse(tag)
+    }
+
+    // ── artifact-aware version candidacy ─────────────────────────────────────
+    // Regression: pglast>=6,<8 resolved to 7.16, whose ONLY artifact is a compiled
+    // sdist, so the build aborted even though 7.15 ships a cp310 manylinux wheel.
+    #[test]
+    fn sdist_only_release_is_not_an_installable_candidate() {
+        let releases = vec![
+            (
+                "7.16".to_string(),
+                vec![sdist("pglast-7.16.tar.gz")],
+            ),
+            (
+                "7.15".to_string(),
+                vec![
+                    sdist("pglast-7.15.tar.gz"),
+                    entry("pglast-7.15-cp310-cp310-manylinux2014_x86_64.whl"),
+                ],
+            ),
+            (
+                "7.14".to_string(),
+                vec![entry("pglast-7.14-cp310-cp310-manylinux2014_x86_64.whl")],
+            ),
+        ];
+        let got = installable_versions(&releases, "cp310", PLAT, ARCH);
+        assert!(!got.contains(&"7.16".to_string()), "sdist-only release must not be a candidate");
+        assert!(got.contains(&"7.15".to_string()));
+        assert!(got.contains(&"7.14".to_string()));
+
+        // …and the resolver picks the newest wheel-shipping release in range.
+        let spec = crate::python::pep440::SpecifierSet::parse(">=6,<8");
+        assert_eq!(crate::python::pep440::select_best(&got, &spec), Some("7.15"));
+    }
+
+    // A wheel built for another interpreter must not make a release look installable.
+    #[test]
+    fn wheel_for_other_interpreter_is_not_installable() {
+        let releases = vec![(
+            "9.9".to_string(),
+            vec![entry("pkg-9.9-cp313-cp313-manylinux2014_x86_64.whl")],
+        )];
+        assert!(installable_versions(&releases, "cp310", PLAT, ARCH).is_empty());
+    }
+
+    // Pure-python projects that publish a py3-none-any wheel stay installable.
+    #[test]
+    fn pure_python_wheel_is_installable() {
+        let releases = vec![("1.2".to_string(), vec![entry("pkg-1.2-py3-none-any.whl")])];
+        assert_eq!(installable_versions(&releases, "cp310", PLAT, ARCH), vec!["1.2".to_string()]);
     }
 
     // ── sdist vs wheel detection ─────────────────────────────────────────────

@@ -239,7 +239,7 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
             if d.version.is_empty() {
                 let norm = normalize_python_name(&d.name);
                 let spec = constraints.get(&norm).cloned().unwrap_or_default();
-                match crate::python::client::resolve_best_version(&d.name, &spec) {
+                match crate::python::client::resolve_best_version(&d.name, &spec, &py_tag) {
                     Ok(v) => { d.version = v; }
                     Err(e) => { tracing::warn!(pkg = %d.name, "Could not resolve version: {e}"); continue; }
                 }
@@ -317,9 +317,10 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
                 // Resolve to the highest version satisfying the AND of all
                 // constraints seen for this package (an exact `==` short-circuits
                 // inside resolve_best_version; a genuinely unsatisfiable bound is
-                // logged and falls back to latest rather than aborting).
+                // logged and falls back to latest rather than aborting). The py tag
+                // keeps the choice to versions this interpreter has a wheel for.
                 let spec = constraints.get(&norm).cloned().unwrap_or_default();
-                let version = match crate::python::client::resolve_best_version(&t.name, &spec) {
+                let version = match crate::python::client::resolve_best_version(&t.name, &spec, &py_tag) {
                     Ok(v) => v,
                     Err(e) => { tracing::warn!(pkg = %t.name, "Could not resolve version: {e}"); continue; }
                 };
