@@ -5,6 +5,31 @@ All notable changes to KONG are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and KONG adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.6] — 2026-07-09
+
+### Fixed
+- **Never select a version KONG cannot install (artifact-aware resolution).**
+  `resolve_best_version` chose the highest version satisfying the PEP 440
+  specifier without checking whether that release ships an installable artifact;
+  wheel-vs-sdist selection happened only afterwards. A release whose *only*
+  artifact is a **compiled sdist** was therefore selected and then aborted in
+  `sdist::install_sdist` (KONG ships no C toolchain), even when an older release
+  in range published a perfectly good wheel.
+
+  Seen in the wild with `pglast>=6,<8`: PyPI received 7.16's sdist at
+  `2026-07-09T05:55:10Z` and its first wheel at `06:21:20Z`. Every environment
+  built in that 26-minute window failed, with no manifest change anywhere.
+
+  Resolution now prefers the highest satisfying version that publishes a wheel
+  compatible with the target interpreter (reusing the existing `select_best_file_for`
+  scorer), falling back to wheel-less releases only when no version in range ships
+  one — the normal case for pure-Python sdist-only projects, which install fine.
+  A compiled sdist still fails loudly rather than degrading silently.
+
+  `list_versions` became `list_releases` (the PyPI JSON already carried the per-version
+  file lists; they were being discarded), and `resolve_best_version` takes the target
+  Python tag. New pure helper `installable_versions()` is host-independent and unit-tested.
+
 ## [0.8.5] — 2026-07-06
 
 ### Fixed
