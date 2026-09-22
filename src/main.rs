@@ -178,7 +178,7 @@ fn main() -> Result<()> {
                 python::venv::build_venv(&env_dir, py, &store::store_root()?, &rules)?;
             }
             if let Some(ref node) = rules.node {
-                node::modules::build_node_modules(&env_dir, node, &store::store_root()?)?;
+                node::modules::build_node_modules(&env_dir, &dest, node, &store::store_root()?)?;
             }
             if let Some(ref rs) = rules.rust {
                 rust_eco::source::configure_source_replacement(&env_dir, rs, &store::store_root()?, &rules)?;
@@ -248,7 +248,7 @@ fn main() -> Result<()> {
                 info!(path = %env_dir.join(".venv").display(), "Python .venv created");
             }
             if let Some(ref node) = rules.node {
-                node::modules::build_node_modules(&env_dir, node, &store::store_root()?)?;
+                node::modules::build_node_modules(&env_dir, project_dir, node, &store::store_root()?)?;
                 info!(path = %env_dir.join("node_modules").display(), "Node node_modules created");
             }
             if let Some(ref rs) = rules.rust {
@@ -333,7 +333,7 @@ fn main() -> Result<()> {
                 info!("  ✓ Python .venv");
             }
             if let Some(ref node_sec) = rules.node {
-                node::modules::build_node_modules(&env_dir, node_sec, &store::store_root()?)?;
+                node::modules::build_node_modules(&env_dir, &dest, node_sec, &store::store_root()?)?;
                 info!("  ✓ Node node_modules");
             }
             if let Some(ref rs) = rules.rust {

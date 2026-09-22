@@ -5,6 +5,35 @@ All notable changes to KONG are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and KONG adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Local `file:` / `link:` Node dependencies no longer abort `kong rules`.** A project
+  depending on `"@real3d/atoms": "file:../vendor/atoms"` failed with
+  `Error: package '../../CRM_Atoms@0.1.0' not found on npm`. `parse_package_lock` kept every
+  lockfile key carrying a `version` and used the raw key as the package name when it had no
+  `node_modules/` segment — so link TARGETS (`"../vendor/atoms"`) and stale `extraneous` targets
+  (`"../../CRM_Atoms"`) were sent to the npm registry. Keys outside `node_modules/` are now never
+  treated as registry packages (a workspace member's own nested install inside the project,
+  `packages/x/node_modules/y`, keeps its previous behaviour).
+- **npm tarballs whose root directory is not `package/`** are linked from that root. npm strips the
+  first path component whatever its name; `@types/node@24.13.6` ships `node v24.13/`, which KONG
+  linked as `node_modules/@types/node/node v24.13/` (TS2688 *Cannot find type definition file for
+  'node'*). Fixed in `build_node_modules` and `kong solidify` (new `package_content_root`).
+  Every DefinitelyTyped `@types/*` tarball has this shape (`qrcode/`, `node/`, `estree/`…): on a
+  copy of the CRM frontend, a fresh `kong use` with 0.8.5 failed `npm run build` with
+  `TS7016: Could not find a declaration file for module 'qrcode'`; it now builds.
+
+### Added
+- **Local Node packages are first-class.** `link: true` lockfile entries, `resolved: "file:<dir>"`
+  entries, v1 `"version": "file:<dir>"` and `file:`/`link:` specs in `package.json` become local
+  deps: recorded in `kong.rules` → `node.local` (path relative to the project, as declared) and
+  linked by `kong use` as a junction/symlink `node_modules/<name>` → the directory, like npm —
+  never downloaded, never copied into the store. `node.local` is omitted when empty (unchanged
+  `kong.rules` for every other project; older kong versions ignore the field). A missing target
+  errors with the dependency, declared path, resolved path and the declaring lockfile entry; a
+  local tarball errors clearly instead of hitting the registry.
+
 ## [0.8.6] — 2026-07-09
 
 ### Fixed

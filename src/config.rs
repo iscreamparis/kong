@@ -94,6 +94,52 @@ pub struct PythonSection {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NodeSection {
     pub packages: Vec<PackageEntry>,
+    /// Local packages (`file:`/`link:` deps, npm `link: true` entries). Never
+    /// in the store: `kong use` links `node_modules/<name>` to the directory,
+    /// exactly like npm. Omitted when empty, so a project without local deps
+    /// writes a byte-identical kong.rules; an older kong reading a newer
+    /// kong.rules ignores the field (no `deny_unknown_fields`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local: Vec<LocalPackageEntry>,
+}
+
+/// A local Node package linked (not copied) into `node_modules/<name>`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalPackageEntry {
+    pub name: String,
+    /// Version read from the target's own package.json (informational).
+    pub version: String,
+    /// Target directory exactly as the project declares it, `/`-separated:
+    /// relative to the project directory (kong.rules' directory) — the normal
+    /// case — or absolute when the manifest itself says so.
+    pub path: String,
+}
+
+impl LocalPackageEntry {
+    /// Absolute target directory for a project rooted at `project_dir`.
+    pub fn resolve(&self, project_dir: &Path) -> std::path::PathBuf {
+        resolve_local_path(project_dir, &self.path)
+    }
+}
+
+/// Join a declared local path onto the project dir (absolute paths win) and
+/// normalise `.`/`..` lexically, so errors and junction targets read cleanly.
+pub fn resolve_local_path(project_dir: &Path, declared: &str) -> std::path::PathBuf {
+    use std::path::Component;
+    let joined = project_dir.join(declared);
+    let mut out = std::path::PathBuf::new();
+    for c in joined.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -110,6 +156,59 @@ pub struct PackageEntry {
     pub store_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
+}
+
+/// Validate a local Node dependency and build its kong.rules entry.
+///
+/// The target must be an existing directory holding a package.json — the same
+/// precondition npm enforces for a `file:<dir>` dependency. The error names the
+/// dependency, the declared and resolved paths, and the manifest entry that
+/// declared it, so a moved or renamed checkout is diagnosable at a glance.
+pub fn local_entry_for(
+    project_dir: &Path,
+    name: &str,
+    src: &crate::node::parser::LocalSource,
+) -> Result<LocalPackageEntry> {
+    let target = resolve_local_path(project_dir, &src.path);
+    if !target.is_dir() {
+        anyhow::bail!(
+            "local Node dependency '{name}' points at a directory that does not exist:\n  \
+             declared path : {}\n  \
+             resolved to   : {}\n  \
+             declared by   : {}\n\
+             Fix the path in package.json (and regenerate package-lock.json), or restore the \
+             directory. kong links local packages in place; it cannot fetch them from a registry.",
+            src.path, target.display(), src.origin
+        );
+    }
+    let pkg_json = target.join("package.json");
+    let version = match std::fs::read_to_string(&pkg_json) {
+        Ok(txt) => {
+            let v: serde_json::Value = serde_json::from_str(&txt).with_context(|| {
+                format!(
+                    "local Node dependency '{name}': invalid JSON in {} (declared by {})",
+                    pkg_json.display(), src.origin
+                )
+            })?;
+            if let Some(n) = v.get("name").and_then(|n| n.as_str()) {
+                if n != name {
+                    tracing::warn!(
+                        dep = %name, target_name = %n, path = %target.display(),
+                        "local package's own name differs from the dependency name (npm links it under the dependency name)"
+                    );
+                }
+            }
+            v.get("version").and_then(|v| v.as_str()).unwrap_or("0.0.0").to_string()
+        }
+        Err(_) => anyhow::bail!(
+            "local Node dependency '{name}': {} has no package.json, so it is not a Node package\n  \
+             declared path : {}\n  \
+             declared by   : {}",
+            target.display(), src.path, src.origin
+        ),
+    };
+    info!(pkg = %name, path = %src.path, "Local Node package (linked, not stored)");
+    Ok(LocalPackageEntry { name: name.to_string(), version, path: src.path.clone() })
 }
 
 // ── Read / Write ────────────────────────────────────────────────────────────
@@ -350,7 +449,14 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
 
         info!(count = node_deps.len(), version = %runtime.version, "Processing Node packages");
         let mut packages = Vec::new();
+        let mut local = Vec::new();
         for dep in &node_deps {
+            // Local (`file:`/`link:`) package: validated and recorded, never
+            // fetched from the registry nor copied into the store.
+            if let Some(ref src) = dep.local {
+                local.push(local_entry_for(project_dir, &dep.name, src)?);
+                continue;
+            }
             let safe_name = dep.name.replace('/', "+");
             let store_path = format!("node/libs/{}-{}", safe_name, dep.version);
             let full_store_path = store_root.join(&store_path);
@@ -377,7 +483,7 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
             }
         }
         let entry = RuntimeEntry { version: runtime.version, store_path: runtime.store_path };
-        (Some(entry), Some(NodeSection { packages }))
+        (Some(entry), Some(NodeSection { packages, local }))
     } else {
         (None, None)
     };
@@ -743,6 +849,43 @@ mod tests {
 
     /// `generate_rules` with an explicit `--name` records exactly that name in
     /// `KongRules.project`.
+    #[test]
+    fn local_entry_keeps_relative_path_and_reads_version() {
+        let root = tempfile::TempDir::new().unwrap();
+        let vendor = root.path().join("vendor").join("atoms");
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::write(vendor.join("package.json"), r#"{"name":"@real3d/atoms","version":"0.1.0"}"#).unwrap();
+        let app = root.path().join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let src = crate::node::parser::LocalSource { path: "../vendor/atoms".into(), origin: "test".into() };
+        let e = local_entry_for(&app, "@real3d/atoms", &src).unwrap();
+        assert_eq!(e, LocalPackageEntry { name: "@real3d/atoms".into(), version: "0.1.0".into(), path: "../vendor/atoms".into() });
+        assert_eq!(e.resolve(&app), resolve_local_path(root.path(), "vendor/atoms"));
+    }
+
+    #[test]
+    fn local_entry_error_names_dep_path_and_origin() {
+        let app = tempfile::TempDir::new().unwrap();
+        let src = crate::node::parser::LocalSource {
+            path: "../../CRM_Atoms".into(),
+            origin: "package-lock.json entry \"node_modules/@real3d/atoms\" (link → \"../../CRM_Atoms\")".into(),
+        };
+        let msg = local_entry_for(app.path(), "@real3d/atoms", &src).unwrap_err().to_string();
+        assert!(msg.contains("'@real3d/atoms'"), "{msg}");
+        assert!(msg.contains("../../CRM_Atoms"), "{msg}");
+        assert!(msg.contains("node_modules/@real3d/atoms"), "{msg}");
+        assert!(msg.contains("does not exist"), "{msg}");
+    }
+
+    #[test]
+    fn node_section_without_local_serializes_like_before() {
+        let s = NodeSection { packages: vec![], local: vec![] };
+        assert_eq!(serde_json::to_string(&s).unwrap(), r#"{"packages":[]}"#);
+        // …and an old kong.rules (no `local`) still reads.
+        let back: NodeSection = serde_json::from_str(r#"{"packages":[]}"#).unwrap();
+        assert!(back.local.is_empty());
+    }
+
     #[test]
     fn generate_rules_honors_explicit_name() {
         let tmp = tempfile::TempDir::new().unwrap();
