@@ -875,7 +875,7 @@ fn run_clone_flow(
         push_clone_log(window, "  ✓ Python .venv");
     }
     if let Some(ref node) = rules.node {
-        crate::node::modules::build_node_modules(&env_dir, node, &store_root)?;
+        crate::node::modules::build_node_modules(&env_dir, &dest, node, &store_root)?;
         push_clone_log(window, "  ✓ Node node_modules");
     }
     if let Some(ref rs) = rules.rust {
@@ -1141,6 +1141,9 @@ fn preview_scan_deps(window: &KongWindow, dir: &Path) -> Result<()> {
         let mut node_missing_transitive: usize = 0;
         let mut node_in_store: usize = 0;
         for dep in &node_deps {
+            if dep.is_local() {
+                continue; // linked in place, never in the store
+            }
             total += 1;
             let safe_name = dep.name.replace('/', "+");
             let dir_name = format!("{}-{}", safe_name, dep.version);

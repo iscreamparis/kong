@@ -90,7 +90,7 @@ pub fn import_project(project_dir: &Path) -> Result<()> {
         info!("  ✓ Python .venv created");
     }
     if let Some(ref node) = rules.node {
-        crate::node::modules::build_node_modules(&env_dir, node, &store_root)?;
+        crate::node::modules::build_node_modules(&env_dir, project_dir, node, &store_root)?;
         info!("  ✓ Node node_modules created");
     }
     if let Some(ref rs) = rules.rust {
@@ -387,7 +387,7 @@ fn adopt_node(project_dir: &Path, store_root: &Path) -> Result<Option<NodeSectio
     if packages.is_empty() {
         return Ok(None);
     }
-    Ok(Some(NodeSection { packages }))
+    Ok(Some(NodeSection { packages, local: Vec::new() }))
 }
 
 /// Copy one installed Node package into the store under the `package/`
@@ -470,7 +470,7 @@ pub fn solidify_project(project_dir: &Path) -> Result<()> {
 
     if let Some(ref node) = rules.node {
         let nm = project_dir.join("node_modules");
-        solidify_node(&nm, node, &store_root)?;
+        solidify_node(&nm, project_dir, node, &store_root)?;
         info!("  ✓ Node node_modules solidified (real local copy)");
     }
 
@@ -684,11 +684,17 @@ fn pathdiff_relative(link: &Path, target: &Path) -> Option<PathBuf> {
 /// Create a real (non-linked) node_modules by copying packages from the store.
 fn solidify_node(
     nm_dir: &Path,
+    project_dir: &Path,
     node: &config::NodeSection,
     store_root: &Path,
 ) -> Result<()> {
     remove_link_or_dir(nm_dir)?;
     std::fs::create_dir_all(nm_dir)?;
+
+    // Local (`file:`) packages stay LINKED, exactly as npm leaves them — a
+    // copy would freeze live source. The project stays kong-free: a junction
+    // to a sibling directory is plain npm layout.
+    crate::node::modules::link_local_packages(nm_dir, project_dir, &node.local)?;
 
     for pkg in &node.packages {
         let src = store_root.join(&pkg.store_path);
@@ -697,12 +703,9 @@ fn solidify_node(
             continue;
         }
 
-        // npm tarballs unpack with a `package/` subdirectory
-        let content_dir = if src.join("package").is_dir() {
-            src.join("package")
-        } else {
-            src.clone()
-        };
+        // npm tarballs unpack with a `package/` subdirectory (or another single
+        // top-level dir — see package_content_root).
+        let content_dir = crate::node::modules::package_content_root(&src);
 
         let dst = nm_dir.join(&pkg.name);
         if pkg.name.contains('/') {

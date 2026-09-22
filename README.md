@@ -222,6 +222,35 @@ downloads + verifies     →          global store (written once)
 | Node.js | `package.json` | `package-lock.json`, `pnpm-lock.yaml` |
 | Rust | `Cargo.toml` | `Cargo.lock` |
 | Homebrew | `Brewfile` | — (fetches latest bottles from GHCR) |
+
+### Local Node packages (`file:` / `link:` / workspaces)
+
+A dependency declared as `"@scope/pkg": "file:../some/dir"` (or `link:`) is a **local package**:
+KONG never asks the npm registry for it and never copies it into the store. `kong use` makes
+`node_modules/<name>` a **junction (Windows) / symlink (Unix) to the directory itself** — exactly
+what npm does with its default `install-links=false` — so edits to the local package are live.
+
+- `kong rules` records it in `kong.rules` under `node.local`, with the path **as the project
+  declares it** (relative to the project for `file:../x`; absolute only if `package.json` says so):
+  ```json
+  "node": { "packages": [ … ], "local": [ { "name": "@real3d/atoms", "version": "0.1.0", "path": "../vendor/atoms" } ] }
+  ```
+  `node.local` is omitted when empty, so projects without local deps get a byte-identical `kong.rules`.
+- From `package-lock.json`: the `"node_modules/<name>": { "link": true, "resolved": "<dir>" }` entry
+  becomes the local dep. The target's own entry (`"<dir>": { "name", "version", … }`) and anything
+  else keyed outside `node_modules/` (stale `"extraneous": true` targets left by an old link, the
+  target's own `node_modules`) are **not** installed — npm does not install them into the project
+  either. `"resolved": "file:<dir>"` entries (`npm install --install-links`) are local too.
+- **The local package's own dependencies are not installed by KONG** — npm does not install them
+  either for a linked directory (verified with npm 10.9: the lockfile only records the target's
+  metadata; at run time Node resolves the target's imports from the *target's own*
+  `node_modules`). Build the local package in its own directory, or ship it pre-built (`dist/`)
+  and let the consumer's bundler resolve shared peers (`resolve.dedupe`).
+- Errors name the dependency, the declared path, the resolved path and the manifest entry that
+  declared it, e.g.
+  `local Node dependency '@real3d/atoms' points at a directory that does not exist: declared path : ../vendor/atoms …
+  declared by : package-lock.json entry "node_modules/@real3d/atoms" (link → "../vendor/atoms")`.
+- `kong solidify` keeps local packages linked (a copy would freeze live source).
 ---
 
 ## The Store
@@ -490,7 +519,8 @@ KONG is early-stage software. Here's what doesn't work yet — no surprises.
 ### Node.js
 - ~~**Bin scripts not linked.**~~ Fixed — `node_modules/.bin/` is now populated with symlinks (macOS/Linux) or `.cmd` wrappers (Windows) for all packages declaring `"bin"` in their `package.json`.
 - **No peer/optional dependency handling.** Peer deps are not resolved or validated.
-- **pnpm-lock.yaml not fully supported.** Declared in docs but the parser is incomplete — `package-lock.json` is the reliable path.
+- **pnpm-lock.yaml not fully supported.** Declared in docs but the parser is incomplete — `package-lock.json` is the reliable path. (Local `link:`/`file:` entries of a pnpm lockfile are therefore not handled either.)
+- **Local packages: directories only, top level only.** `file:`/`link:` directories are linked (see *Local Node packages*). A local **tarball** (`file:../x-1.0.0.tgz`) fails with a clear error; a local link nested under another package (`node_modules/a/node_modules/b` → dir) is skipped with a warning (KONG's `node_modules` is flat). The local package's own dependencies are never installed by KONG — same as npm.
 
 ### Rust
 - **Cargo features and patches ignored.** Source replacement works for vanilla `Cargo.lock` deps, but `[features]` selections and `[patch]` overrides in `Cargo.toml` are not reflected.
