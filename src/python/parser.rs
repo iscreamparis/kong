@@ -10,12 +10,34 @@ use tracing::debug;
 /// which case `spec` carries the raw PEP 440 specifier (`>=2.10,<3`, `~=1.4`)
 /// so the resolver downloads the highest version that satisfies it rather than
 /// the global latest. Lockfiles produce an exact `version` and an empty `spec`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PythonDep {
     pub name: String,
     pub version: String,
     /// Raw PEP 440 specifier from the manifest (empty for exact lockfile pins).
     pub spec: String,
+    /// Requested extras (`uvicorn[standard]` -> ["standard"]), normalized. Their
+    /// `extra == "..."` Requires-Dist entries are installed too (PEP 508).
+    pub extras: Vec<String>,
+}
+
+/// The extras of a requirement name token: `pkg[a, B_c]` -> ["a", "b-c"]
+/// (PEP 685 normalization). Empty when there are no brackets.
+pub fn parse_extras(raw_name: &str) -> Vec<String> {
+    let (Some(open), Some(close)) = (raw_name.find('['), raw_name.rfind(']')) else {
+        return Vec::new();
+    };
+    if close <= open {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = raw_name[open + 1..close]
+        .split(',')
+        .map(crate::python::markers::normalize_extra)
+        .filter(|e| !e.is_empty())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Detect and parse Python dependency files in a project directory.
@@ -94,15 +116,28 @@ pub fn parse_requirements_txt(path: &Path) -> Result<Vec<PythonDep>> {
 /// the raw `spec` for the resolver to satisfy. A bare `name` (no specifier) ->
 /// empty version + empty spec (resolves to latest).
 fn parse_requirement_line(line: &str) -> Option<PythonDep> {
-    // Strip environment markers and extras for the name; keep the specifier raw.
+    // Environment markers: a requirement whose marker is DEFINITELY false on this
+    // host (`pywin32==306; sys_platform == "win32"` on Linux) is not a dependency
+    // here; an unknown marker keeps it (markers.rs). Extras are stripped below.
+    if let Some(idx) = line.find(';') {
+        if !crate::python::markers::marker_applies(&line[idx + 1..]) {
+            return None;
+        }
+    }
     let body = line.split(';').next().unwrap_or(line).trim();
     if body.is_empty() {
         return None;
     }
     // Name runs until the first specifier operator. Brackets ([extras]) and the
     // usual name chars are part of the name token.
-    let name_end = body
+    // An `[extras]` group may contain spaces (`pkg[a, b]`): search after it.
+    let search_from = match (body.find('['), body.find(']')) {
+        (Some(o), Some(c)) if o < c => c + 1,
+        _ => 0,
+    };
+    let name_end = body[search_from..]
         .find(|c: char| matches!(c, '=' | '!' | '<' | '>' | '~' | ' ' | '\t'))
+        .map(|i| i + search_from)
         .unwrap_or(body.len());
     let raw_name = body[..name_end].trim();
     let name = match raw_name.find('[') {
@@ -112,6 +147,7 @@ fn parse_requirement_line(line: &str) -> Option<PythonDep> {
     if name.is_empty() {
         return None;
     }
+    let extras = parse_extras(raw_name);
     let spec = body[name_end..].trim().to_string();
 
     // Exact single `==X.Y.Z` pin → concrete version, empty spec.
@@ -121,6 +157,7 @@ fn parse_requirement_line(line: &str) -> Option<PythonDep> {
             name: normalize_python_name(name),
             version: pin,
             spec: String::new(),
+            extras,
         });
     }
 
@@ -128,6 +165,7 @@ fn parse_requirement_line(line: &str) -> Option<PythonDep> {
         name: normalize_python_name(name),
         version: String::new(),
         spec,
+        extras,
     })
 }
 
@@ -205,6 +243,7 @@ pub fn parse_uv_lock(path: &Path) -> Result<Vec<PythonDep>> {
                     name: normalize_python_name(name),
                     version: version.to_string(),
                     spec: String::new(),
+                    extras: Vec::new(),
                 });
             }
         }
@@ -230,6 +269,7 @@ pub fn parse_poetry_lock(path: &Path) -> Result<Vec<PythonDep>> {
                     name: normalize_python_name(name),
                     version: version.to_string(),
                     spec: String::new(),
+                    extras: Vec::new(),
                 });
             }
         }
@@ -260,6 +300,7 @@ pub fn parse_pipfile_lock(path: &Path) -> Result<Vec<PythonDep>> {
                         name: normalize_python_name(name),
                         version: version.to_string(),
                         spec: String::new(),
+                        extras: Vec::new(),
                     });
                 }
             }
@@ -284,6 +325,7 @@ fn parse_poetry_constraint(name: &str, raw: &str) -> Option<PythonDep> {
             name: normalize_python_name(name),
             version: String::new(),
             spec: String::new(),
+            extras: Vec::new(),
         });
     }
 
@@ -309,12 +351,14 @@ fn parse_poetry_constraint(name: &str, raw: &str) -> Option<PythonDep> {
             name: normalize_python_name(name),
             version: pin,
             spec: String::new(),
+            extras: Vec::new(),
         });
     }
     Some(PythonDep {
         name: normalize_python_name(name),
         version: String::new(),
         spec,
+        extras: Vec::new(),
     })
 }
 
@@ -405,6 +449,16 @@ mod tests {
         let dep = parse_requirement_line("requests[security]>=2.0").unwrap();
         assert_eq!(dep.name, "requests");
         assert_eq!(dep.spec, ">=2.0");
+
+        // Extras are captured, normalized and sorted.
+        let dep = parse_requirement_line("uvicorn[Standard, dev_tools]>=0.30").unwrap();
+        assert_eq!(dep.name, "uvicorn");
+        assert_eq!(dep.extras, vec!["dev-tools".to_string(), "standard".to_string()]);
+        assert!(parse_requirement_line("fastapi").unwrap().extras.is_empty());
+
+        // A platform marker that is false on this host drops the requirement.
+        let win_only = parse_requirement_line("pywin32==306; sys_platform == 'win32'");
+        assert_eq!(win_only.is_some(), cfg!(windows));
     }
 
     #[test]
