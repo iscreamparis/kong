@@ -47,6 +47,8 @@ pub struct TransitiveDep {
     pub version: String,
     /// The raw specifier string as declared by the parent (may be empty).
     pub spec: String,
+    /// Extras the parent requests on this dependency (`pyjwt[crypto]`).
+    pub extras: Vec<String>,
 }
 
 /// Fetch metadata from PyPI, download the best wheel, and extract to store.
@@ -251,10 +253,10 @@ pub fn resolve_best_version(
     resolve_latest_version(name)
 }
 
-/// Parse `Requires-Dist` lines — public alias so config.rs can call it for
-/// already-cached packages.
-pub fn parse_requires_dist_pub(entries: &[String]) -> Vec<TransitiveDep> {
-    parse_requires_dist(entries)
+/// `Requires-Dist` of a package installed WITH `extras`: the `extra == "<x>"`
+/// entries for a requested extra are dependencies too (PEP 508).
+pub fn parse_requires_dist_with_extras(entries: &[String], extras: &[String]) -> Vec<TransitiveDep> {
+    parse_requires_dist_impl(entries, extras)
 }
 
 /// Parse `Requires-Dist` lines from PyPI `info.requires_dist`.
@@ -268,14 +270,20 @@ pub fn parse_requires_dist_pub(entries: &[String]) -> Vec<TransitiveDep> {
 /// `Requires-Dist` surface any extra-gated deps (which we skip, matching pip's
 /// default no-extras behaviour for transitive resolution here).
 fn parse_requires_dist(entries: &[String]) -> Vec<TransitiveDep> {
+    parse_requires_dist_impl(entries, &[])
+}
+
+fn parse_requires_dist_impl(entries: &[String], extras: &[String]) -> Vec<TransitiveDep> {
     let mut deps = Vec::new();
     for entry in entries {
-        // Skip anything with "extra ==" — those are optional deps
-        if entry.contains("extra ==") || entry.contains("extra==") {
-            continue;
-        }
-        // Strip environment markers (semicolon and after)
+        // Environment markers (semicolon and after): a dependency whose marker is
+        // DEFINITELY false on this host (e.g. `pywin32; sys_platform == "win32"`
+        // on Linux) is skipped; an unknown marker keeps it; `extra == "x"` is
+        // true only when the parent was installed with extra x (markers.rs).
         let body = if let Some(idx) = entry.find(';') {
+            if !crate::python::markers::marker_applies_with_extras(&entry[idx + 1..], extras) {
+                continue;
+            }
             entry[..idx].trim()
         } else {
             entry.trim()
@@ -304,6 +312,7 @@ fn parse_requires_dist(entries: &[String]) -> Vec<TransitiveDep> {
             name: dep_name,
             version,
             spec: spec_str,
+            extras: crate::python::parser::parse_extras(raw_name),
         });
     }
     deps
@@ -364,7 +373,11 @@ fn select_best_file_for<'a>(
     let target = TargetTag::parse(target_py_tag);
 
     let mut best: Option<(i32, &PypiFileEntry)> = None;
-    for f in files.iter().filter(|f| f.packagetype == "bdist_wheel") {
+    for f in files
+        .iter()
+        .filter(|f| f.packagetype == "bdist_wheel")
+        .filter(|f| requires_python_allows(f.requires_python.as_deref(), &target))
+    {
         if let Some(score) = score_wheel(&f.filename, &target, platform_tag, arch_suffix) {
             let better = match best {
                 None => true,
@@ -381,7 +394,35 @@ fn select_best_file_for<'a>(
     }
 
     // No compatible wheel — fall back to a source dist (built locally if able).
-    files.iter().find(|f| f.packagetype == "sdist")
+    files
+        .iter()
+        .find(|f| f.packagetype == "sdist" && requires_python_allows(f.requires_python.as_deref(), &target))
+}
+
+/// Does a file's `Requires-Python` (PEP 345, published per file by PyPI) admit
+/// the target interpreter? A pure-Python `py3-none-any` wheel says nothing about
+/// the minor version in its filename: `websockets` 17.1 ships
+/// `Requires-Python: >=3.11` and uses `typing.Self`, and was installed into a
+/// 3.10 venv (ImportError at import). The target is known only as `cpXY`, so the
+/// file is admitted when SOME patch release of X.Y satisfies it (X.Y.0 or
+/// X.Y.9999). No / unparseable metadata admits the file (old behaviour).
+fn requires_python_allows(requires_python: Option<&str>, target: &TargetTag) -> bool {
+    let Some(raw) = requires_python.map(str::trim).filter(|r| !r.is_empty()) else {
+        return true;
+    };
+    let digits = target.py_tag.trim_start_matches(|c: char| !c.is_ascii_digit());
+    if digits.len() < 2 {
+        return true;
+    }
+    let (major, minor) = digits.split_at(1);
+    let spec = crate::python::pep440::SpecifierSet::parse(raw);
+    if spec.is_empty() {
+        return true;
+    }
+    [format!("{major}.{minor}.0"), format!("{major}.{minor}.9999")]
+        .iter()
+        .filter_map(|v| crate::python::pep440::Version::parse(v))
+        .any(|v| spec.matches(&v))
 }
 
 /// The target interpreter's wheel tag, parsed once. e.g. "cp310" → cp/3/10.
@@ -693,6 +734,73 @@ mod tests {
 
     fn target(tag: &str) -> TargetTag {
         TargetTag::parse(tag)
+    }
+
+    #[test]
+    fn requires_dist_skips_deps_whose_platform_marker_is_false_here() {
+        // mcp's real Requires-Dist: pywin32 is Windows-only.
+        let deps = parse_requires_dist(&[
+            "anyio>=4.5".to_string(),
+            "pywin32>=310; sys_platform == \"win32\"".to_string(),
+            "uvloop>=0.18; sys_platform != 'win32'".to_string(),
+            "tomli>=1.1; python_version < '3.11'".to_string(),
+            "rich; extra == \"cli\"".to_string(),
+        ]);
+        let names: Vec<&str> = deps.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"anyio"));
+        assert!(names.contains(&"tomli"), "unknown marker keeps the dep");
+        assert!(!names.contains(&"rich"), "extras still skipped");
+
+        // mcp -> pyjwt[crypto] -> cryptography: the requested extra is carried and
+        // the extra-gated dep is installed only when that extra is requested.
+        let mcp = parse_requires_dist(&["pyjwt[crypto]>=2.10.1".to_string()]);
+        assert_eq!(mcp[0].name, "pyjwt");
+        assert_eq!(mcp[0].extras, vec!["crypto".to_string()]);
+        let pyjwt = [
+            "typing_extensions>=4.0; python_version < \"3.11\"".to_string(),
+            "cryptography>=3.4.0; extra == \"crypto\"".to_string(),
+            "sphinx; extra == \"docs\"".to_string(),
+        ];
+        let plain: Vec<String> = parse_requires_dist(&pyjwt).into_iter().map(|d| d.name).collect();
+        assert!(!plain.contains(&"cryptography".to_string()));
+        let with: Vec<String> = parse_requires_dist_with_extras(&pyjwt, &["crypto".to_string()])
+            .into_iter().map(|d| d.name).collect();
+        assert!(with.contains(&"cryptography".to_string()));
+        assert!(!with.contains(&"sphinx".to_string()));
+        assert!(with.contains(&"typing_extensions".to_string()));
+        if cfg!(windows) {
+            assert!(names.contains(&"pywin32"));
+            assert!(!names.contains(&"uvloop"));
+        } else {
+            assert!(!names.contains(&"pywin32"));
+            assert!(names.contains(&"uvloop"));
+        }
+    }
+
+    // ── Requires-Python ───────────────────────────────────────────────────────
+    // Regression: websockets 17.1 (py3-none-any, Requires-Python >=3.11, uses
+    // typing.Self) was selected for a cp310 runtime -> ImportError at startup.
+    #[test]
+    fn requires_python_excludes_wheels_for_newer_interpreters() {
+        let mut new = entry("websockets-17.1-py3-none-any.whl");
+        new.requires_python = Some(">=3.11".to_string());
+        let mut old = entry("websockets-16.0-py3-none-any.whl");
+        old.requires_python = Some(">=3.10".to_string());
+        let t = target("cp310");
+        assert!(!requires_python_allows(new.requires_python.as_deref(), &t));
+        assert!(requires_python_allows(old.requires_python.as_deref(), &t));
+        assert!(requires_python_allows(new.requires_python.as_deref(), &target("cp311")));
+        assert!(requires_python_allows(Some(">=3.10.1"), &t), "some 3.10.x satisfies");
+        assert!(requires_python_allows(Some("<3.11,>=3.8"), &t));
+        assert!(!requires_python_allows(Some("<3.10"), &t));
+        assert!(requires_python_allows(None, &t));
+        assert!(requires_python_allows(Some(""), &t));
+        // the whole release becomes a non-candidate, so the resolver picks 16.0
+        let releases = vec![
+            ("17.1".to_string(), vec![new]),
+            ("16.0".to_string(), vec![old]),
+        ];
+        assert_eq!(installable_versions(&releases, "cp310", PLAT, ARCH), vec!["16.0".to_string()]);
     }
 
     // ── artifact-aware version candidacy ─────────────────────────────────────

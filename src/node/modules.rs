@@ -48,8 +48,26 @@ pub fn build_node_modules(
             remove_dir_link(&top_level)?;
         }
         if top_level.exists() {
-            debug!(pkg = %pkg.name, "Already linked, skipping");
-            continue;
+            // Keep it only when it is the version kong.rules asks for. The env's
+            // node_modules outlives a re-resolution (`kong rules` after a lockfile
+            // change): skipping a present dir left vite 8.0.11 in place after the
+            // rules moved to 8.3.0, and vite then imported a rolldown export that
+            // only its own pinned rolldown has (SyntaxError at build).
+            match installed_version(&top_level) {
+                Some(v) if v == pkg.version => {
+                    debug!(pkg = %pkg.name, "Already linked, skipping");
+                    continue;
+                }
+                found => {
+                    info!(pkg = %pkg.name, found = ?found, wanted = %pkg.version,
+                          "Stale package in node_modules: relinking");
+                    // The env's own tree (deep hard links): removing it never
+                    // touches the store's copy.
+                    link::remove_dir_all_robust(&top_level).with_context(|| {
+                        format!("failed to remove stale {}", top_level.display())
+                    })?;
+                }
+            }
         }
 
         // Create @scope/ parent if needed
@@ -144,6 +162,13 @@ pub fn build_node_modules(
     }
 
     Ok(())
+}
+
+/// `version` of the package.json at `dir` (None when absent/unreadable).
+fn installed_version(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("package.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("version")?.as_str().map(str::to_string)
 }
 
 /// The directory holding a stored npm package's `package.json`.
@@ -371,6 +396,42 @@ mod tests {
             std::fs::canonicalize(&other).unwrap()
         );
         assert!(vendor.join("marker.txt").exists(), "old target must be untouched");
+    }
+
+    /// A store entry `node/libs/<name>-<version>/package/package.json`.
+    fn stored(store: &Path, name: &str, version: &str) -> crate::config::PackageEntry {
+        let rel = format!("node/libs/{name}-{version}");
+        let dir = store.join(&rel).join("package");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("package.json"), format!(r#"{{"name":"{name}","version":"{version}"}}"#)).unwrap();
+        std::fs::write(dir.join(format!("v{version}.js")), "x").unwrap();
+        crate::config::PackageEntry {
+            name: name.into(), version: version.into(), hash: None, store_path: rel, source_url: None,
+        }
+    }
+
+    #[test]
+    fn use_relinks_a_package_whose_version_changed_in_the_rules() {
+        // Regression: vite 8.0.11 stayed in node_modules after kong.rules moved to
+        // 8.3.0 ("Already linked, skipping"), so the build ran the wrong vite.
+        let (_root, _vendor, app, env) = fixture();
+        let store = tempfile::TempDir::new().unwrap();
+        let old = NodeSection { packages: vec![stored(store.path(), "vite", "8.0.11")], local: vec![] };
+        build_node_modules(&env, &app, &old, store.path()).unwrap();
+        let vite = env.join("node_modules").join("vite");
+        assert_eq!(installed_version(&vite).as_deref(), Some("8.0.11"));
+
+        let new = NodeSection { packages: vec![stored(store.path(), "vite", "8.3.0")], local: vec![] };
+        build_node_modules(&env, &app, &new, store.path()).unwrap();
+        assert_eq!(installed_version(&vite).as_deref(), Some("8.3.0"));
+        assert!(vite.join("v8.3.0.js").exists());
+        assert!(!vite.join("v8.0.11.js").exists(), "no file of the old version left behind");
+        // the store still has both versions untouched
+        assert!(store.path().join("node/libs/vite-8.0.11/package/v8.0.11.js").exists());
+
+        // same version again: kept (idempotent, no relink)
+        build_node_modules(&env, &app, &new, store.path()).unwrap();
+        assert_eq!(installed_version(&vite).as_deref(), Some("8.3.0"));
     }
 
     #[test]

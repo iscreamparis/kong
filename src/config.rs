@@ -347,12 +347,57 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
         }
 
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Extras already expanded per package key (`name-version`): a package can be
+        // reached plain first and later as `pkg[extra]`, whose extra-gated deps must
+        // still be installed (PEP 508) without installing the package twice.
+        let mut expanded_extras: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
+        // Version each package name was resolved to (for a later `[extra]` request).
+        let mut resolved_version: HashMap<String, String> = HashMap::new();
         let mut queue: VecDeque<crate::python::parser::PythonDep> = resolved_direct.into_iter().collect();
 
         while let Some(dep) = queue.pop_front() {
             let key = format!("{}-{}", dep.name.to_lowercase().replace('-', "_"), dep.version);
+            let done_extras = expanded_extras.entry(key.clone()).or_default();
+            let new_extras: Vec<String> =
+                dep.extras.iter().filter(|e| !done_extras.contains(*e)).cloned().collect();
+            done_extras.extend(dep.extras.iter().cloned());
+            resolved_version.insert(dep.name.to_lowercase().replace('-', "_"), dep.version.clone());
             if !seen.insert(key) {
-                continue; // already processed
+                if new_extras.is_empty() {
+                    continue; // already processed
+                }
+                // Already installed: only its newly requested extras' deps are new.
+                let extra_deps = read_transitive_from_store_with_extras(
+                    &store_root.join(format!(
+                        "python/libs/{}-{}-{}-{}",
+                        dep.name, dep.version, py_tag, platform
+                    )),
+                    &new_extras,
+                );
+                for t in extra_deps {
+                    let t_key = t.name.to_lowercase().replace('-', "_");
+                    if let Some(v) = resolved_version.get(&t_key) {
+                        queue.push_back(crate::python::parser::PythonDep {
+                            name: t.name, version: v.clone(), spec: String::new(), extras: t.extras,
+                        });
+                        continue;
+                    }
+                    let norm = normalize_python_name(&t.name);
+                    let entry = constraints.entry(norm.clone()).or_default();
+                    if !t.version.is_empty() {
+                        entry.merge(&SpecifierSet::parse(&format!("=={}", t.version)));
+                    } else if !t.spec.is_empty() {
+                        entry.merge(&SpecifierSet::parse(&t.spec));
+                    }
+                    let spec = constraints.get(&norm).cloned().unwrap_or_default();
+                    match crate::python::client::resolve_best_version(&t.name, &spec, &py_tag) {
+                        Ok(version) => queue.push_back(crate::python::parser::PythonDep {
+                            name: t.name, version, spec: String::new(), extras: t.extras,
+                        }),
+                        Err(e) => tracing::warn!(pkg = %t.name, "Could not resolve version: {e}"),
+                    }
+                }
+                continue;
             }
 
             let store_path = format!(
@@ -387,6 +432,13 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
                     dep.name, dep.version, py_tag, platform
                 )))
             };
+            // A package requested with extras (`uvicorn[standard]`): its
+            // extra-gated Requires-Dist entries are dependencies too.
+            let transitive = if dep.extras.is_empty() {
+                transitive
+            } else {
+                read_transitive_from_store_with_extras(&full_store_path, &dep.extras)
+            };
 
             // Enqueue transitive deps not yet seen.
             for t in transitive {
@@ -410,6 +462,15 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
                     let s_name = s.split('-').next().unwrap_or(s);
                     s_name == t_key
                 }) {
+                    // ...unless the parent asks for extras: re-queue the SAME version so
+                    // its extra-gated deps get expanded (handled at the top of the loop).
+                    if !t.extras.is_empty() {
+                        if let Some(v) = resolved_version.get(&t_key) {
+                            queue.push_back(crate::python::parser::PythonDep {
+                                name: t.name, version: v.clone(), spec: String::new(), extras: t.extras,
+                            });
+                        }
+                    }
                     continue;
                 }
 
@@ -427,6 +488,7 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
                     name: t.name,
                     version,
                     spec: String::new(),
+                    extras: t.extras,
                 });
             }
         }
@@ -733,6 +795,15 @@ pub fn short_python_tag(full_version: &str) -> String {
 /// Read `Requires-Dist` from an already-extracted wheel in the store.
 /// Used when the package is already cached so we don't re-download it.
 fn read_transitive_from_store(store_path: &std::path::Path) -> Vec<crate::python::client::TransitiveDep> {
+    read_transitive_from_store_with_extras(store_path, &[])
+}
+
+/// Requires-Dist of an extracted package, including the entries gated on one of
+/// `extras` (`extra == "standard"`).
+fn read_transitive_from_store_with_extras(
+    store_path: &std::path::Path,
+    extras: &[String],
+) -> Vec<crate::python::client::TransitiveDep> {
     // The wheel is extracted flat: <store_path>/<PkgName>-<ver>.dist-info/METADATA
     let dist_info = match std::fs::read_dir(store_path) {
         Ok(rd) => rd,
@@ -749,7 +820,7 @@ fn read_transitive_from_store(store_path: &std::path::Path) -> Vec<crate::python
                     .filter(|l| l.starts_with("Requires-Dist:"))
                     .map(|l| l["Requires-Dist:".len()..].trim().to_string())
                     .collect();
-                return crate::python::client::parse_requires_dist_pub(&requires);
+                return crate::python::client::parse_requires_dist_with_extras(&requires, extras);
             }
         }
     }

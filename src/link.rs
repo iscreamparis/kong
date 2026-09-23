@@ -154,23 +154,87 @@ pub fn create_project_junctions(
                     debug!(path = %dst.display(), "Removed Vite-only node_modules before junction");
                 }
             }
-            if !dst.exists() {
-                link_dir(&src, &dst)
-                    .with_context(|| format!("failed to junction node_modules into project dir"))?;
-                debug!(dst = %dst.display(), "Junctioned node_modules into project dir");
-            }
+            ensure_dir_link(&src, &dst)
+                .with_context(|| format!("failed to junction node_modules into project dir"))?;
         }
     }
     if rules.python.is_some() {
         let src = env_dir.join(".venv");
         let dst = project_dir.join(".venv");
-        if src.exists() && !dst.exists() {
-            link_dir(&src, &dst)
+        if src.exists() {
+            ensure_dir_link(&src, &dst)
                 .with_context(|| format!("failed to junction .venv into project dir"))?;
-            debug!(dst = %dst.display(), "Junctioned .venv into project dir");
         }
     }
     Ok(())
+}
+
+/// True when `p` itself is a link (symlink, or a junction on Windows), dangling or not.
+/// `Path::exists` follows the link, so a DANGLING one looks absent to it — yet creating a new
+/// link at that path fails with "File exists" (os error 17).
+fn is_dir_link(p: &Path) -> bool {
+    let symlink = std::fs::symlink_metadata(p)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    #[cfg(windows)]
+    {
+        symlink || junction::exists(p).unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        symlink
+    }
+}
+
+/// Make `dst` a link to `src`:
+/// - absent: create the link;
+/// - already a link to `src`: nothing to do;
+/// - a link to anything else, dangling or not (e.g. a `node_modules` symlink COMMITTED in a repo,
+///   pointing at another machine's RULEZ such as `/Users/<someone>/Library/...`): re-point it.
+///   Only the link entry is removed, never what it pointed at;
+/// - a real directory or file: left alone (someone's own install, never deleted by kong).
+fn ensure_dir_link(src: &Path, dst: &Path) -> Result<()> {
+    if is_dir_link(dst) {
+        let same = match (std::fs::canonicalize(dst), std::fs::canonicalize(src)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        };
+        if same {
+            return Ok(());
+        }
+        remove_dir_link(dst)
+            .with_context(|| format!("failed to remove stale link {}", dst.display()))?;
+        debug!(dst = %dst.display(), "Re-pointing a stale/dangling link");
+    } else if std::fs::symlink_metadata(dst).is_ok() {
+        debug!(dst = %dst.display(), "Real directory in place — not linking over it");
+        return Ok(());
+    }
+    link_dir(src, dst)?;
+    debug!(dst = %dst.display(), "Linked into project dir");
+    Ok(())
+}
+
+/// Remove a link entry (never its target).
+fn remove_dir_link(p: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        if junction::exists(p).unwrap_or(false) {
+            junction::delete(p)?;
+            // junction::delete clears the reparse point and leaves an empty directory behind.
+            if std::fs::symlink_metadata(p).is_ok() {
+                std::fs::remove_dir(p)?;
+            }
+            return Ok(());
+        }
+        // A directory symlink (git for Windows with core.symlinks) is removed like a directory.
+        std::fs::remove_dir(p).or_else(|_| std::fs::remove_file(p))?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::remove_file(p)?;
+        Ok(())
+    }
 }
 
 /// Remove project-dir junctions created by `create_project_junctions`.
@@ -432,5 +496,53 @@ mod tests {
                 // Symlinks not available (Windows without Developer Mode) — skip
             }
         }
+    }
+
+    /// A repo that COMMITS its `node_modules` / `.venv` symlinks (DummyKong: they point at
+    /// `/Users/isabelle/Library/Application Support/kong/RULEZ/...`) checks them out DANGLING on
+    /// any other machine. `kong use` used to see "absent" (`exists()` follows the link) and then
+    /// fail with "File exists (os error 17)". The stale link must be re-pointed at this env.
+    #[cfg(unix)]
+    #[test]
+    fn create_project_junctions_repoints_dangling_committed_links() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        let env = tmp.path().join("env");
+        std::fs::create_dir_all(env.join("node_modules/vue")).unwrap();
+        std::fs::create_dir_all(env.join(".venv/lib")).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        let elsewhere = tmp.path().join("Users/someone/RULEZ/Other");
+        std::os::unix::fs::symlink(elsewhere.join("node_modules"), project.join("node_modules")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join(".venv"), project.join(".venv")).unwrap();
+        assert!(!project.join("node_modules").exists(), "precondition: dangling");
+
+        let rules: crate::config::KongRules = serde_json::from_value(serde_json::json!({
+            "version": 1, "project": "t", "generated": "test",
+            "node": {"packages": []},
+            "python": {"version": "3.12.0", "platform": "linux_x86_64", "packages": []}
+        }))
+        .unwrap();
+        create_project_junctions(&project, &env, &rules).unwrap();
+
+        assert!(project.join("node_modules/vue").is_dir());
+        assert!(project.join(".venv/lib").is_dir());
+        assert_eq!(std::fs::read_link(project.join("node_modules")).unwrap(), env.join("node_modules"));
+        // Idempotent: a second run keeps the correct links.
+        create_project_junctions(&project, &env, &rules).unwrap();
+        assert_eq!(std::fs::read_link(project.join(".venv")).unwrap(), env.join(".venv"));
+    }
+
+    /// A REAL node_modules directory (someone's own npm install) is never replaced or deleted.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_dir_link_leaves_a_real_directory_alone() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("env_nm");
+        std::fs::create_dir_all(&src).unwrap();
+        let dst = tmp.path().join("node_modules");
+        std::fs::create_dir_all(dst.join("left-pad")).unwrap();
+        ensure_dir_link(&src, &dst).unwrap();
+        assert!(dst.join("left-pad").is_dir());
+        assert!(!dst.is_symlink());
     }
 }
