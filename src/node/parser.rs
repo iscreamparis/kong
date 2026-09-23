@@ -78,7 +78,12 @@ fn parse_all(project_dir: &Path) -> Result<Vec<NodeDep>> {
     let lock = project_dir.join("package-lock.json");
     if lock.exists() {
         debug!("Found package-lock.json");
-        return parse_package_lock(&lock);
+        let mut deps = parse_package_lock(&lock)?;
+        let pkg = project_dir.join("package.json");
+        if pkg.exists() {
+            prefer_absolute_manifest_paths(&mut deps, &pkg)?;
+        }
+        return Ok(deps);
     }
 
     let pkg = project_dir.join("package.json");
@@ -88,6 +93,52 @@ fn parse_all(project_dir: &Path) -> Result<Vec<NodeDep>> {
     }
 
     Ok(vec![])
+}
+
+/// A local (`file:`/`link:`) dependency the MANIFEST declares with an ABSOLUTE
+/// path keeps that path, whatever the lockfile says.
+///
+/// npm always records a local dependency in package-lock.json RELATIVE to the
+/// lockfile (`"resolved": "../../nomorechat/vendor/atoms"`), even when
+/// package.json spells it absolute (`"file:/root/nmc/nomorechat/vendor/atoms"`).
+/// The relative form breaks as soon as the project is used from another depth
+/// than the one the lockfile was resolved in — a git worktree of the project, a
+/// copy — and kong then aborts with "points at a directory that does not exist"
+/// (measured on a nomorechat embedded project: its lockfile is committed and
+/// every task runs in a worktree under another root). The absolute manifest
+/// path is position-independent and is what the author wrote, so it wins.
+fn prefer_absolute_manifest_paths(deps: &mut [NodeDep], manifest: &Path) -> Result<()> {
+    let content = std::fs::read_to_string(manifest)
+        .with_context(|| format!("failed to read {}", manifest.display()))?;
+    let doc: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse JSON: {}", manifest.display()))?;
+    for section in &["dependencies", "devDependencies", "optionalDependencies"] {
+        let Some(map) = doc.get(section).and_then(|d| d.as_object()) else { continue };
+        for (name, spec) in map {
+            let spec = spec.as_str().unwrap_or_default();
+            let Some(p) = spec.strip_prefix("file:").or_else(|| spec.strip_prefix("link:")) else { continue };
+            let p = p.replace('\\', "/");
+            if !Path::new(&p).is_absolute() && !is_windows_absolute(&p) {
+                continue;
+            }
+            for dep in deps.iter_mut().filter(|d| &d.name == name) {
+                if let Some(local) = dep.local.as_mut() {
+                    if local.path != p {
+                        debug!(pkg = %name, lock = %local.path, manifest = %p, "Local dep: absolute manifest path wins over the lockfile's relative one");
+                        local.path = p.clone();
+                        local.origin = format!("package.json {section} \"{name}\": \"{spec}\"");
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `C:/x` or `C:\\x` — absolute on Windows even when this build runs elsewhere.
+fn is_windows_absolute(p: &str) -> bool {
+    let b = p.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
 }
 
 /// Drop dependencies that are not installable on `host`.
@@ -645,6 +696,64 @@ mod tests {
 
         // Nothing path-shaped may ever reach the registry client.
         assert!(deps.iter().all(|d| !d.name.starts_with('.')), "{deps:?}");
+    }
+
+    /// npm writes a local dep RELATIVE in the lockfile even when package.json
+    /// declares it absolute; from another depth (a worktree) the relative path
+    /// points nowhere. The absolute manifest path must win.
+    #[test]
+    fn absolute_manifest_file_path_wins_over_relative_lockfile_path() {
+        let root = tempfile::TempDir::new().unwrap();
+        let vendor = root.path().join("vendor").join("atoms");
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::write(vendor.join("package.json"), r#"{"name":"@real3d/atoms","version":"0.1.0"}"#).unwrap();
+        // The project sits at a depth the lockfile's relative path was NOT resolved from.
+        let app = root.path().join("worktrees").join("7").join("12");
+        std::fs::create_dir_all(&app).unwrap();
+        let abs = vendor.to_string_lossy().replace('\\', "/");
+        std::fs::write(app.join("package.json"), format!(
+            r#"{{"name":"p","dependencies":{{"@real3d/atoms":"file:{abs}","vue":"^3.5.0"}}}}"#)).unwrap();
+        std::fs::write(app.join("package-lock.json"), r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "p" },
+                "../../vendor/atoms": { "name": "@real3d/atoms", "version": "0.1.0" },
+                "node_modules/@real3d/atoms": { "resolved": "../../vendor/atoms", "link": true },
+                "node_modules/vue": { "version": "3.5.13", "resolved": "https://registry.npmjs.org/vue/-/vue-3.5.13.tgz" }
+            }
+        }"#).unwrap();
+        let deps = parse_all(&app).unwrap();
+        let atoms = deps.iter().find(|d| d.name == "@real3d/atoms").unwrap();
+        let local = atoms.local.as_ref().unwrap();
+        assert_eq!(local.path, abs, "absolute manifest path kept: {deps:?}");
+        assert!(local.origin.starts_with("package.json dependencies"), "{}", local.origin);
+        assert_eq!(atoms.version, "0.1.0", "version still read from the lockfile");
+        let entry = crate::config::local_entry_for(&app, &atoms.name, local).unwrap();
+        assert_eq!(entry.resolve(&app), vendor);
+        // registry packages untouched
+        assert!(deps.iter().any(|d| d.name == "vue" && d.version == "3.5.13" && d.local.is_none()));
+    }
+
+    /// A RELATIVE manifest path leaves the lockfile's entry exactly as before.
+    #[test]
+    fn relative_manifest_file_path_keeps_lockfile_path() {
+        let root = tempfile::TempDir::new().unwrap();
+        let app = root.path().join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("package.json"),
+            r#"{"name":"p","dependencies":{"@real3d/atoms":"file:../vendor/atoms"}}"#).unwrap();
+        std::fs::write(app.join("package-lock.json"), r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": { "name": "p" },
+                "../vendor/atoms": { "name": "@real3d/atoms", "version": "0.1.0" },
+                "node_modules/@real3d/atoms": { "resolved": "../vendor/atoms", "link": true }
+            }
+        }"#).unwrap();
+        let deps = parse_all(&app).unwrap();
+        let local = deps[0].local.as_ref().unwrap();
+        assert_eq!(local.path, "../vendor/atoms");
+        assert!(local.origin.starts_with("package-lock.json"), "{}", local.origin);
     }
 
     #[test]
