@@ -12,12 +12,12 @@ const PBS_RELEASES_API: &str =
 /// A resolved Python runtime in the store.
 pub struct PythonRuntime {
     pub version: String,
-    pub store_path: String,     // relative, e.g. "python/runtime/3.12.9"
-    pub _python_exe: PathBuf,   // absolute path to python.exe / python3
+    pub store_path: String,   // relative, e.g. "python/runtime/3.12.9"
+    pub _python_exe: PathBuf, // absolute path to python.exe / python3
 }
 
-/// Ensure the requested Python major.minor is present in the store.
-/// `requested` can be "3.12", "3.11", etc. Pass "" / "latest" to pick the newest.
+/// Ensure the requested Python minor or exact patch is present in the store.
+/// Pass "" / "latest" to preserve the first compatible release asset behavior.
 pub fn ensure_runtime(store_root: &Path, requested: &str) -> Result<PythonRuntime> {
     let (asset_url, version) = resolve_asset(requested)?;
 
@@ -31,11 +31,19 @@ pub fn ensure_runtime(store_root: &Path, requested: &str) -> Result<PythonRuntim
         download_and_extract(&asset_url, &runtime_dir)?;
     }
 
-    let exe = python_exe_in(&runtime_dir)
-        .with_context(|| format!("python executable not found after extraction in {}", runtime_dir.display()))?;
+    let exe = python_exe_in(&runtime_dir).with_context(|| {
+        format!(
+            "python executable not found after extraction in {}",
+            runtime_dir.display()
+        )
+    })?;
 
     info!(version = %version, exe = %exe.display(), "Python runtime ready");
-    Ok(PythonRuntime { version, store_path, _python_exe: exe })
+    Ok(PythonRuntime {
+        version,
+        store_path,
+        _python_exe: exe,
+    })
 }
 
 // ── Internal helpers ────────────────────────────────────────────────────────
@@ -54,38 +62,73 @@ fn resolve_asset(requested: &str) -> Result<(String, String)> {
         .query(&[("per_page", "10")])
         .send()
         .context("failed to reach GitHub API for python-build-standalone")?
+        .error_for_status()
+        .context("GitHub API rejected python-build-standalone releases request")?
         .json()
         .context("failed to parse GitHub releases JSON")?;
 
-    for release in &releases {
+    select_asset(&releases, requested, &platform_suffix)
+}
+
+fn select_asset(
+    releases: &[GhRelease],
+    requested: &str,
+    platform_suffix: &str,
+) -> Result<(String, String)> {
+    use super::version_request::version_parts;
+    let request = if requested.is_empty() || requested == "latest" {
+        None
+    } else {
+        Some(
+            version_parts(requested)
+                .with_context(|| format!("Invalid requested Python version '{requested}'"))?,
+        )
+    };
+    let mut available = std::collections::BTreeSet::new();
+    let mut best: Option<(&GhAsset, String, Vec<u32>)> = None;
+    for release in releases {
         for asset in &release.assets {
-            if !asset.name.ends_with(".tar.gz") {
+            if !asset.name.ends_with(".tar.gz") || !asset.name.contains(platform_suffix) {
                 continue;
             }
-            if !asset.name.contains("install_only") {
+            let Ok(version) = extract_version(&asset.name) else {
+                continue;
+            };
+            let Some(parts) = version_parts(&version) else {
+                continue;
+            };
+            available.insert(version.clone());
+            let Some(wanted) = &request else {
+                // Preserve the historical unpinned behavior (first compatible asset).
+                return Ok((asset.browser_download_url.clone(), version));
+            };
+            if parts[..2] != wanted[..2] {
                 continue;
             }
-            if !asset.name.contains(&platform_suffix) {
-                continue;
+            if wanted.len() == 3 && &parts == wanted {
+                return Ok((asset.browser_download_url.clone(), version));
             }
-            // Extract version from filename: cpython-3.12.9+20250101-x86_64-...
-            let version = extract_version(&asset.name)?;
-            if !requested.is_empty() && requested != "latest" {
-                // Check major.minor match
-                let major_minor = requested.trim_start_matches("python").trim().to_string();
-                if !version.starts_with(&major_minor) {
-                    continue;
-                }
+            if best
+                .as_ref()
+                .map_or(true, |(_, _, previous)| parts > *previous)
+            {
+                best = Some((asset, version, parts));
             }
-            debug!(asset = %asset.name, version = %version, "Selected Python asset");
-            return Ok((asset.browser_download_url.clone(), version));
         }
     }
-
-    bail!(
-        "No suitable Python runtime found for platform '{platform_suffix}' (requested: '{requested}'). \
-         Check https://github.com/indygreg/python-build-standalone/releases"
-    )
+    if let Some((asset, version, _)) = best {
+        if request.as_ref().is_some_and(|v| v.len() == 3) {
+            tracing::warn!("Requested Python {requested} is unavailable in the scanned releases; using newest same-minor Python {version}");
+        }
+        debug!(asset = %asset.name, version = %version, "Selected Python asset");
+        return Ok((asset.browser_download_url.clone(), version));
+    }
+    let available = if available.is_empty() {
+        "none".into()
+    } else {
+        available.into_iter().collect::<Vec<_>>().join(", ")
+    };
+    bail!("No suitable Python runtime for requested '{requested}' on '{platform_suffix}'; available versions in scanned releases: {available}")
 }
 
 /// Download the tar.gz and extract into `dest`.
@@ -93,7 +136,10 @@ fn download_and_extract(url: &str, dest: &Path) -> Result<()> {
     info!(url = %url, "Downloading Python runtime archive");
     let tmp = tempfile::TempDir::new()?;
     let result = crate::download::download_and_verify(url, tmp.path(), None)?;
-    info!(size = result.path.metadata().map(|m| m.len()).unwrap_or(0), "Downloaded Python runtime");
+    info!(
+        size = result.path.metadata().map(|m| m.len()).unwrap_or(0),
+        "Downloaded Python runtime"
+    );
 
     std::fs::create_dir_all(dest)?;
 
@@ -160,12 +206,16 @@ fn extract_version(filename: &str) -> Result<String> {
 fn platform_asset_suffix() -> String {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("windows", "x86_64") => "x86_64-pc-windows-msvc-install_only".to_string(),
-        ("linux", "x86_64")   => "x86_64-unknown-linux-gnu-install_only".to_string(),
-        ("macos", "x86_64")   => "x86_64-apple-darwin-install_only".to_string(),
-        ("macos", "aarch64")  => "aarch64-apple-darwin-install_only".to_string(),
+        ("linux", "x86_64") => "x86_64-unknown-linux-gnu-install_only".to_string(),
+        ("macos", "x86_64") => "x86_64-apple-darwin-install_only".to_string(),
+        ("macos", "aarch64") => "aarch64-apple-darwin-install_only".to_string(),
         (os, arch) => format!("{arch}-unknown-{os}-install_only"),
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_tests.rs"]
+mod tests;
 
 // ── GitHub API types ────────────────────────────────────────────────────────
 
