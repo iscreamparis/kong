@@ -268,11 +268,44 @@ pub fn parse_requires_dist_pub(entries: &[String]) -> Vec<TransitiveDep> {
 /// `Requires-Dist` surface any extra-gated deps (which we skip, matching pip's
 /// default no-extras behaviour for transitive resolution here).
 fn parse_requires_dist(entries: &[String]) -> Vec<TransitiveDep> {
+    let platform = match std::env::consts::OS { "windows" => "win32", "macos" => "darwin", other => other };
+    parse_requires_dist_for_platform(entries, platform)
+}
+
+#[cfg(test)]
+#[test]
+fn transitive_simple_platform_markers() {
+    let entries = vec!["pywin32>=311; sys_platform == \"win32\"".into(), "uvicorn>=0.31; sys_platform != 'emscripten'".into(), "plain>=1".into()];
+    let names = |platform| parse_requires_dist_for_platform(&entries, platform).into_iter().map(|d| d.name).collect::<Vec<_>>();
+    assert_eq!(names("linux"), ["uvicorn", "plain"]);
+    assert_eq!(names("darwin"), ["uvicorn", "plain"]);
+    assert_eq!(names("win32"), ["pywin32", "uvicorn", "plain"]);
+    assert_eq!(names("emscripten"), ["plain"]);
+}
+
+fn parse_requires_dist_for_platform(entries: &[String], platform: &str) -> Vec<TransitiveDep> {
     let mut deps = Vec::new();
     for entry in entries {
         // Skip anything with "extra ==" — those are optional deps
         if entry.contains("extra ==") || entry.contains("extra==") {
             continue;
+        }
+        // Evaluate simple sys_platform equality/inequality before stripping.
+        // Complex markers retain legacy behavior; this is not a PEP 508 solver.
+        if let Some((_, marker)) = entry.split_once(';') {
+            if let Some(rest) = marker.trim().strip_prefix("sys_platform") {
+                let rest = rest.trim();
+                let comparison = rest.strip_prefix("==").map(|v| (v, true))
+                    .or_else(|| rest.strip_prefix("!=").map(|v| (v, false)));
+                if let Some((value, equal)) = comparison {
+                    let value = value.trim();
+                    let quoted = value.strip_prefix('"').and_then(|v| v.strip_suffix('"'))
+                        .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')));
+                    if let Some(value) = quoted.filter(|v| !v.contains(['\'', '"'])) {
+                        if (platform == value) != equal { continue; }
+                    }
+                }
+            }
         }
         // Strip environment markers (semicolon and after)
         let body = if let Some(idx) = entry.find(';') {
