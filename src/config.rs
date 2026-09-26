@@ -302,7 +302,17 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
     let python_deps = crate::python::parser::detect_and_parse(project_dir)?;
     let (python_runtime, python_section) = if !python_deps.is_empty() {
         info!("Found Python dependencies — ensuring runtime");
-        let runtime = crate::python::runtime::ensure_runtime(&store_root, "latest")?;
+        let requested = crate::python::version_request::requested_version(project_dir)?;
+        info!(version = %requested, "Requested Python runtime");
+        if let Ok(previous) = read_rules(&project_dir.join("kong.rules")) {
+            if let Some(old) = previous.runtimes.and_then(|r| r.python) {
+                let minor = |v: &str| v.split('.').take(2).collect::<Vec<_>>().join(".");
+                if requested != "latest" && minor(&old.version) != minor(&requested) {
+                    tracing::warn!("Python runtime request changed from {} to {}; kong use will rebuild the RULEZ venv", old.version, requested);
+                }
+            }
+        }
+        let runtime = crate::python::runtime::ensure_runtime(&store_root, &requested)?;
         let py_tag = short_python_tag(&runtime.version); // e.g. "cp312"
 
         info!(count = python_deps.len(), version = %runtime.version, "Processing Python packages");

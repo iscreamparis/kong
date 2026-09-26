@@ -223,6 +223,28 @@ downloads + verifies     →          global store (written once)
 | Rust | `Cargo.toml` | `Cargo.lock` |
 | Homebrew | `Brewfile` | — (fetches latest bottles from GHCR) |
 
+### Choosing the Python runtime
+
+`kong rules` chooses the interpreter independently of dependency lockfiles:
+
+1. Project-local `.python-version`: first non-empty, non-comment line, containing
+   `major.minor` (for example `3.11`) or `major.minor.patch` (`3.11.9`). Invalid
+   entries fail clearly rather than silently choosing another runtime.
+2. Otherwise `[project].requires-python` in `pyproject.toml`, when numeric bounds
+   identify one minor: `>=3.11,<3.12`, `==3.11.*`, or `~=3.11.2`, for example.
+   This selects the minor, not a patch-level constraint solver. Broad or unsupported
+   constraints retain the default. An empty/comment-only version file also falls
+   through to this step.
+3. Otherwise `latest`, preserving the historical first compatible asset in the
+   newest release (not necessarily the highest Python minor).
+
+A minor request selects its highest available patch across the ten scanned
+python-build-standalone releases. A patch request selects that exact version if
+present; otherwise it warns and chooses the highest patch **of the same minor**.
+If that minor is absent, the error names the request and available platform
+versions; Kong never silently switches minors. Changing minors relative to an
+existing `kong.rules` prints a notice: run `kong use` to rebuild the RULEZ venv.
+
 ### Local Node packages (`file:` / `link:` / workspaces)
 
 A dependency declared as `"@scope/pkg": "file:../some/dir"` (or `link:`) is a **local package**:
@@ -512,6 +534,10 @@ No pip. No npm. No brew. No conda. No rustup. Just KONG.
 KONG is early-stage software. Here's what doesn't work yet — no surprises.
 
 ### Python
+- **Dependency extras and complex environment markers are incomplete.** Simple
+  `sys_platform == "..."` / `!= "..."` markers are respected, but complex markers
+  and requested extras are not fully evaluated. For example, MCP's `pyjwt[crypto]`
+  requires an explicit `cryptography` requirement until extras resolution lands.
 - **No sdist compilation.** KONG downloads pre-built wheels only. If a package has no wheel for your platform (rare for popular packages, common for niche ones), it will download the source tarball but won't compile C extensions. Packages like `numpy`, `flask`, `requests` ship wheels and work fine.
 - **`requires_python` not checked.** A package requiring Python 3.11+ will be selected even if KONG manages Python 3.10.
 - **Version ranges not resolved.** `>=1.0` or `~=2.3` in `requirements.txt` are skipped — only exact pins (`==`) and lockfile versions are handled. Use a lockfile for reliable results.
