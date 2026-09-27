@@ -10,12 +10,14 @@ use tracing::debug;
 /// which case `spec` carries the raw PEP 440 specifier (`>=2.10,<3`, `~=1.4`)
 /// so the resolver downloads the highest version that satisfies it rather than
 /// the global latest. Lockfiles produce an exact `version` and an empty `spec`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PythonDep {
     pub name: String,
     pub version: String,
     /// Raw PEP 440 specifier from the manifest (empty for exact lockfile pins).
     pub spec: String,
+    pub marker: String,
+    pub extras: Vec<String>,
 }
 
 /// Detect and parse Python dependency files in a project directory.
@@ -93,17 +95,18 @@ pub fn parse_requirements_txt(path: &Path) -> Result<Vec<PythonDep>> {
 /// `version`; anything else (`>=`, `<`, `~=`, ranges, `!=`, `==X.*`) is kept as
 /// the raw `spec` for the resolver to satisfy. A bare `name` (no specifier) ->
 /// empty version + empty spec (resolves to latest).
-fn parse_requirement_line(line: &str) -> Option<PythonDep> {
-    // Strip environment markers and extras for the name; keep the specifier raw.
-    let body = line.split(';').next().unwrap_or(line).trim();
+pub fn parse_requirement_line(line: &str) -> Option<PythonDep> {
+    let (body, marker) = line.split_once(';').unwrap_or((line, ""));
+    let body = body.trim();
+    let marker = marker.trim().to_string();
     if body.is_empty() {
         return None;
     }
     // Name runs until the first specifier operator. Brackets ([extras]) and the
     // usual name chars are part of the name token.
-    let name_end = body
-        .find(|c: char| matches!(c, '=' | '!' | '<' | '>' | '~' | ' ' | '\t'))
-        .unwrap_or(body.len());
+    let name_end = if let Some(end) = body.find(']') { end + 1 } else {
+        body.find(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, '-' | '_' | '.')).unwrap_or(body.len())
+    };
     let raw_name = body[..name_end].trim();
     let name = match raw_name.find('[') {
         Some(b) => raw_name[..b].trim(),
@@ -112,22 +115,16 @@ fn parse_requirement_line(line: &str) -> Option<PythonDep> {
     if name.is_empty() {
         return None;
     }
-    let spec = body[name_end..].trim().to_string();
+    let extras = raw_name.split_once('[').map(|(_, x)| x.trim_end_matches(']').split(',')
+        .map(|s| super::markers::normalize_extra(s.trim())).filter(|s| !s.is_empty()).collect()).unwrap_or_default();
+    let spec = body[name_end..].trim().trim_start_matches('(').trim_end_matches(')').trim().to_string();
 
-    // Exact single `==X.Y.Z` pin → concrete version, empty spec.
     let set = crate::python::pep440::SpecifierSet::parse(&spec);
-    if let Some(pin) = set.exact_pin() {
-        return Some(PythonDep {
-            name: normalize_python_name(name),
-            version: pin,
-            spec: String::new(),
-        });
-    }
-
+    let version = set.exact_pin().unwrap_or_default();
     Some(PythonDep {
         name: normalize_python_name(name),
-        version: String::new(),
-        spec,
+        spec: if version.is_empty() { spec } else { String::new() },
+        version, marker, extras,
     })
 }
 
@@ -205,6 +202,7 @@ pub fn parse_uv_lock(path: &Path) -> Result<Vec<PythonDep>> {
                     name: normalize_python_name(name),
                     version: version.to_string(),
                     spec: String::new(),
+            ..Default::default()
                 });
             }
         }
@@ -230,6 +228,7 @@ pub fn parse_poetry_lock(path: &Path) -> Result<Vec<PythonDep>> {
                     name: normalize_python_name(name),
                     version: version.to_string(),
                     spec: String::new(),
+            ..Default::default()
                 });
             }
         }
@@ -260,6 +259,7 @@ pub fn parse_pipfile_lock(path: &Path) -> Result<Vec<PythonDep>> {
                         name: normalize_python_name(name),
                         version: version.to_string(),
                         spec: String::new(),
+            ..Default::default()
                     });
                 }
             }
@@ -284,6 +284,7 @@ fn parse_poetry_constraint(name: &str, raw: &str) -> Option<PythonDep> {
             name: normalize_python_name(name),
             version: String::new(),
             spec: String::new(),
+            ..Default::default()
         });
     }
 
@@ -309,12 +310,14 @@ fn parse_poetry_constraint(name: &str, raw: &str) -> Option<PythonDep> {
             name: normalize_python_name(name),
             version: pin,
             spec: String::new(),
+            ..Default::default()
         });
     }
     Some(PythonDep {
         name: normalize_python_name(name),
         version: String::new(),
         spec,
+        ..Default::default()
     })
 }
 

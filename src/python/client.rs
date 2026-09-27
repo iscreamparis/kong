@@ -10,7 +10,7 @@ use crate::download::{self, FileInfo};
 #[derive(Debug, Deserialize)]
 struct PypiPackageInfo {
     info: PypiInfo,
-    releases: std::collections::HashMap<String, Vec<PypiFileEntry>>,
+    urls: Vec<PypiFileEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,19 +35,8 @@ struct PypiDigests {
     sha256: String,
 }
 
-/// A transitive dependency discovered from a wheel's `Requires-Dist`.
-///
-/// `version` is a concrete pin ONLY when the parent declared an exact `==X.Y.Z`
-/// (with no wildcard); otherwise it is empty and `spec` carries the original
-/// PEP 440 specifier (`>=2.10,<3`, `~=1.4`, …) so the resolver can pick the
-/// highest version that actually satisfies the bound — not the global latest.
-#[derive(Debug, Clone)]
-pub struct TransitiveDep {
-    pub name: String,
-    pub version: String,
-    /// The raw specifier string as declared by the parent (may be empty).
-    pub spec: String,
-}
+/// Requirements retain markers and requested extras until the target is known.
+pub type TransitiveDep = super::parser::PythonDep;
 
 /// Fetch metadata from PyPI, download the best wheel, and extract to store.
 /// Returns the file info plus any transitive dependencies found in wheel METADATA.
@@ -62,7 +51,7 @@ pub fn fetch_and_download(name: &str, version: &str, target_py_tag: &str, store_
 }
 
 fn fetch_and_download_from(registry: &str, name: &str, version: &str, target_py_tag: &str, store_path: &Path) -> Result<(FileInfo, Vec<TransitiveDep>)> {
-    let url = format!("{registry}/{name}/json");
+    let url = format!("{registry}/{name}/{version}/json");
     debug!(url = %url, "Fetching PyPI metadata");
 
     let response = reqwest::blocking::get(&url)
@@ -73,13 +62,11 @@ fn fetch_and_download_from(registry: &str, name: &str, version: &str, target_py_
     }
 
     let info: PypiPackageInfo = response
+        .error_for_status()?
         .json()
         .with_context(|| format!("failed to parse PyPI response for {name}"))?;
 
-    let files = info
-        .releases
-        .get(version)
-        .with_context(|| format!("version '{version}' not found for '{name}' on PyPI"))?;
+    let files = &info.urls;
 
     // Select best file: prefer a wheel COMPATIBLE with the target interpreter
     // (exact cpXY > abi3 > pure-python), then sdist. A wheel for a different
@@ -255,62 +242,22 @@ pub fn resolve_best_version(
     resolve_latest_version(name)
 }
 
-/// Parse `Requires-Dist` lines — public alias so config.rs can call it for
-/// already-cached packages.
+/// Parse cold and cached metadata identically; filter only when the target and extras are known.
 pub fn parse_requires_dist_pub(entries: &[String]) -> Vec<TransitiveDep> {
     parse_requires_dist(entries)
 }
-
-/// Parse `Requires-Dist` lines from PyPI `info.requires_dist`.
-/// Skips extras (conditional deps like `extra == "async"`) and environment
-/// markers that would exclude this platform. Returns the dependency name, an
-/// exact pin if the parent declared one (`==X.Y.Z`), and the RAW PEP 440
-/// specifier string so the resolver can pick the highest satisfying version.
-///
-/// A bracketed extras request on the dependency itself (`requests[security]`)
-/// has the `[...]` stripped — we resolve the base package and let its own
-/// `Requires-Dist` surface any extra-gated deps (which we skip, matching pip's
-/// default no-extras behaviour for transitive resolution here).
 fn parse_requires_dist(entries: &[String]) -> Vec<TransitiveDep> {
-    let mut deps = Vec::new();
-    for entry in entries {
-        // Skip anything with "extra ==" — those are optional deps
-        if entry.contains("extra ==") || entry.contains("extra==") {
-            continue;
+    entries.iter().filter_map(|s| super::parser::parse_requirement_line(s)).collect()
+}
+
+pub fn applicable_dependencies(deps: Vec<TransitiveDep>, env: &super::markers::MarkerEnvironment, extras: &[String]) -> Result<Vec<TransitiveDep>> {
+    let mut result = Vec::new();
+    for dep in deps {
+        if env.evaluate(&dep.marker, extras).with_context(|| format!("invalid marker for {}: {}", dep.name, dep.marker))? {
+            result.push(dep);
         }
-        // Strip environment markers (semicolon and after)
-        let body = if let Some(idx) = entry.find(';') {
-            entry[..idx].trim()
-        } else {
-            entry.trim()
-        };
-        // Parse "Name>=version,<other" — split the name (incl. optional [extras])
-        // from the specifier. The name runs until the first specifier operator
-        // or whitespace; brackets are part of the name token.
-        let name_end = body
-            .find(|c: char| {
-                !c.is_alphanumeric() && c != '-' && c != '_' && c != '.' && c != '[' && c != ']'
-            })
-            .unwrap_or(body.len());
-        // Drop any [extras] suffix from the resolved package name.
-        let raw_name = body[..name_end].trim();
-        let dep_name = match raw_name.find('[') {
-            Some(b) => raw_name[..b].trim().to_string(),
-            None => raw_name.to_string(),
-        };
-        if dep_name.is_empty() {
-            continue;
-        }
-        let spec_str = body[name_end..].trim().to_string();
-        // Honor an exact pin directly; otherwise carry the raw specifier.
-        let version = extract_exact_pin(&spec_str).unwrap_or_default();
-        deps.push(TransitiveDep {
-            name: dep_name,
-            version,
-            spec: spec_str,
-        });
     }
-    deps
+    Ok(result)
 }
 
 /// Extract a concrete version from a specifier ONLY when it is a single exact,
@@ -752,7 +699,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn markers_fixture_skips_windows_dependency() {
         let entries = vec!["pywin32>=311; sys_platform == 'win32'".into(), "anyio>=4".into()];
-        let deps = parse_requires_dist(&entries);
+        let deps = applicable_dependencies(parse_requires_dist(&entries), &super::super::markers::linux_fixture(), &[]).unwrap();
         assert_eq!(deps.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), vec!["anyio"]);
     }
 

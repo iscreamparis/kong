@@ -1,4 +1,5 @@
 pub mod client;
+pub mod markers;
 pub mod entry_points;
 pub mod parser;
 pub mod pep440;
