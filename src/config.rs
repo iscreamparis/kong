@@ -369,6 +369,7 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
                 });
                 trans
             } else {
+                crate::python::client::validate_requires_python_in_store(&full_store_path, &runtime.version)?;
                 debug!(pkg = %dep.name, ver = %dep.version, "Already in store, skipping");
                 if first_visit {
                     packages.push(PackageEntry {
@@ -402,10 +403,9 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
 
 
                 // Resolve to the highest version satisfying the AND of all
-                // constraints seen for this package (an exact `==` short-circuits
-                // inside resolve_best_version; a genuinely unsatisfiable bound is
-                // logged and falls back to latest rather than aborting). The py tag
-                // keeps the choice to versions this interpreter has a wheel for.
+                // constraints seen for this package. Exact pins and the sdist
+                // fallback must satisfy Requires-Python too; impossible bounds
+                // fail instead of silently falling back to global latest.
                 let spec = constraints.get(&norm).cloned().unwrap_or_default();
                 let version = if let Some(v) = versions.get(&norm) { v.clone() } else {
                     let v = crate::python::client::resolve_best_version(&t.name, &spec, &py_tag, &runtime.version)?;

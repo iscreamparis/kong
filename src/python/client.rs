@@ -47,6 +47,7 @@ pub type TransitiveDep = super::parser::PythonDep;
 /// It is used to reject native wheels built for a different CPython
 /// version/ABI (e.g. a cp313t wheel must never be chosen for a cp310 runtime),
 /// so the wheel actually written matches the `cpXY` tag in the store dir name.
+/// `python_version` is the full runtime version for Requires-Python patch bounds.
 pub fn fetch_and_download(name: &str, version: &str, target_py_tag: &str, python_version: &str, store_path: &Path) -> Result<(FileInfo, Vec<TransitiveDep>)> {
     fetch_and_download_from("https://pypi.org/pypi", name, version, target_py_tag, python_version, store_path)
 }
@@ -96,6 +97,7 @@ fn fetch_and_download_from(registry: &str, name: &str, version: &str, target_py_
     } else {
         crate::extract::extract(&result.path, store_path)?;
     }
+    validate_requires_python_in_store(store_path, python_version)?;
     crate::store::write_verified_marker(store_path, &result.hash)?;
 
     // This is the SELECTED release's metadata, not /<name>/json's latest release.
@@ -126,6 +128,25 @@ fn release_metadata(registry: &str, name: &str, version: &str) -> Result<PypiPac
     Ok(info)
 }
 
+/// Old stores may contain a file chosen before Requires-Python was enforced.
+/// Validate installed metadata before reusing it, even if the same release also
+/// offers a compatible file. Never silently reuse an incompatible cached wheel.
+pub fn validate_requires_python_in_store(store_path: &Path, python_version: &str) -> Result<()> {
+    for entry in std::fs::read_dir(store_path)? {
+        let path = entry?.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("dist-info") { continue; }
+        let metadata = std::fs::read_to_string(path.join("METADATA"))
+            .with_context(|| format!("cannot read cached metadata in {}", path.display()))?;
+        for line in metadata.lines() {
+            let Some((key, spec)) = line.split_once(':') else { continue; };
+            if key.eq_ignore_ascii_case("Requires-Python") && !supports_python(Some(spec.trim()), python_version) {
+                bail!("{} requires Python {}, target is {python_version}; regenerate with kong rules --force to replace an incompatible cached artifact", path.display(), spec.trim());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Test Requires-Python against the full managed interpreter version (not cpXY).
 /// Missing/empty metadata is unconstrained, as specified by PyPI.
 fn supports_python(requires_python: Option<&str>, python_version: &str) -> bool {
@@ -143,13 +164,13 @@ fn supports_python(requires_python: Option<&str>, python_version: &str) -> bool 
 ///
 /// The files come back with the version because artifact availability decides
 /// whether a version is even a candidate — see `resolve_best_version`.
-fn list_releases(name: &str) -> Result<Vec<(String, Vec<PypiFileEntry>)>> {
+fn list_releases(registry: &str, name: &str) -> Result<Vec<(String, Vec<PypiFileEntry>)>> {
     #[derive(Deserialize)]
     struct Response {
         releases: std::collections::HashMap<String, Vec<PypiFileEntry>>,
     }
 
-    let url = format!("https://pypi.org/pypi/{name}/json");
+    let url = format!("{registry}/{name}/json");
     let resp: Response = reqwest::blocking::get(&url)
         .with_context(|| format!("failed to fetch PyPI metadata for {name}"))?
         .json()
@@ -209,12 +230,22 @@ pub fn resolve_best_version(
     target_py_tag: &str,
     python_version: &str,
 ) -> Result<String> {
-    let mut releases = list_releases(name)?;
+    resolve_best_version_from("https://pypi.org/pypi", name, spec, target_py_tag, python_version)
+}
+
+fn resolve_best_version_from(
+    registry: &str,
+    name: &str,
+    spec: &super::pep440::SpecifierSet,
+    target_py_tag: &str,
+    python_version: &str,
+) -> Result<String> {
+    let mut releases = list_releases(registry, name)?;
     loop {
         let version = resolve_from_releases(name, spec, target_py_tag, python_version, &releases)?;
         // Aggregate info describes only the latest release. Fetch the chosen
         // release's own info, including on warm runs, before trusting the store.
-        let metadata = release_metadata("https://pypi.org/pypi", name, &version)?;
+        let metadata = release_metadata(registry, name, &version)?;
         if supports_python(metadata.info.requires_python.as_deref(), python_version)
             && select_best_file(&metadata.urls, target_py_tag, python_version).is_some() {
             return Ok(version);
@@ -630,6 +661,10 @@ fn current_arch_suffix() -> String {
         _ => String::new(),
     }
 }
+
+#[cfg(test)]
+#[path = "requires_python_tests.rs"]
+mod requires_python_tests;
 
 #[cfg(test)]
 mod tests {
