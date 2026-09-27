@@ -1,0 +1,12 @@
+{
+  "roots": ["mcp[cli]==1.0", "pyjwt==1.0", "later==1.0; python_version >= '3.10'", "direct_windows==1; os_name == 'nt'"],
+  "packages": {
+    "mcp": ["pywin32>=311; sys_platform == 'win32'", "cli_tool==1.0; extra == 'cli'", "unrequested==1; extra == 'dev'"],
+    "pyjwt": ["cryptography==1.0; extra == 'crypto'"],
+    "later": ["pyjwt[crypto]==1.0"],
+    "cli_tool": ["mcp[cli]==1.0"],
+    "cryptography": [],
+    "pywin32": [],
+    "direct_windows": []
+  }
+}

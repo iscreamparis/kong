@@ -202,7 +202,7 @@ pub fn parse_uv_lock(path: &Path) -> Result<Vec<PythonDep>> {
                     name: normalize_python_name(name),
                     version: version.to_string(),
                     spec: String::new(),
-            ..Default::default()
+                    ..Default::default()
                 });
             }
         }
@@ -228,7 +228,7 @@ pub fn parse_poetry_lock(path: &Path) -> Result<Vec<PythonDep>> {
                     name: normalize_python_name(name),
                     version: version.to_string(),
                     spec: String::new(),
-            ..Default::default()
+                    ..Default::default()
                 });
             }
         }
@@ -259,7 +259,7 @@ pub fn parse_pipfile_lock(path: &Path) -> Result<Vec<PythonDep>> {
                         name: normalize_python_name(name),
                         version: version.to_string(),
                         spec: String::new(),
-            ..Default::default()
+                        ..Default::default()
                     });
                 }
             }
@@ -408,6 +408,12 @@ mod tests {
         let dep = parse_requirement_line("requests[security]>=2.0").unwrap();
         assert_eq!(dep.name, "requests");
         assert_eq!(dep.spec, ">=2.0");
+        assert_eq!(dep.extras, vec!["security"]);
+        let dep = parse_requirement_line("mcp [cli, TEST.extra] (>=1,<3); sys_platform != 'win32'").unwrap();
+        assert_eq!(dep.name, "mcp");
+        assert_eq!(dep.extras, vec!["cli", "test-extra"]);
+        assert_eq!(dep.spec, ">=1,<3");
+        assert_eq!(dep.marker, "sys_platform != 'win32'");
     }
 
     #[test]

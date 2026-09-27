@@ -107,8 +107,8 @@ fn fetch_and_download_from(registry: &str, name: &str, version: &str, target_py_
     }
     crate::store::write_verified_marker(store_path, &result.hash)?;
 
-    // Collect transitive deps from PyPI info.requires_dist (more reliable than
-    // reading the extracted METADATA file — same data, no filesystem walk).
+    // This is the SELECTED release's metadata, not /<name>/json's latest release.
+    // Keep markers and extras until the resolver evaluates the target environment.
     let transitive = parse_requires_dist(&requires_dist);
 
     Ok((FileInfo {
@@ -250,6 +250,21 @@ fn parse_requires_dist(entries: &[String]) -> Vec<TransitiveDep> {
     entries.iter().filter_map(|s| super::parser::parse_requirement_line(s)).collect()
 }
 
+/// Remember expansion per selected release, revisiting it only for newly requested extras.
+#[derive(Default)]
+pub struct ExpansionState(std::collections::HashMap<String, std::collections::BTreeSet<String>>);
+impl ExpansionState {
+    pub fn activate(&mut self, dep: &TransitiveDep) -> Option<(bool, Vec<String>)> {
+        let key = format!("{}=={}", dep.name, dep.version);
+        let first_visit = !self.0.contains_key(&key);
+        let active = self.0.entry(key).or_default();
+        let mut changed = false;
+        for extra in &dep.extras { changed |= active.insert(extra.clone()); }
+        if !first_visit && !changed { return None; }
+        Some((first_visit, active.iter().cloned().collect()))
+    }
+}
+
 pub fn applicable_dependencies(deps: Vec<TransitiveDep>, env: &super::markers::MarkerEnvironment, extras: &[String]) -> Result<Vec<TransitiveDep>> {
     let mut result = Vec::new();
     for dep in deps {
@@ -260,13 +275,6 @@ pub fn applicable_dependencies(deps: Vec<TransitiveDep>, env: &super::markers::M
     Ok(result)
 }
 
-/// Extract a concrete version from a specifier ONLY when it is a single exact,
-/// non-wildcard `==X.Y.Z` pin. For >= / ~= / ==X.* / ranges → None, so the
-/// caller resolves the highest satisfying version via the specifier set.
-fn extract_exact_pin(spec: &str) -> Option<String> {
-    let set = crate::python::pep440::SpecifierSet::parse(spec);
-    set.exact_pin()
-}
 
 /// Is the selected PyPI file a source distribution (sdist) rather than a wheel?
 ///
@@ -696,11 +704,33 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
     fn markers_fixture_skips_windows_dependency() {
         let entries = vec!["pywin32>=311; sys_platform == 'win32'".into(), "anyio>=4".into()];
         let deps = applicable_dependencies(parse_requires_dist(&entries), &super::super::markers::linux_fixture(), &[]).unwrap();
         assert_eq!(deps.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), vec!["anyio"]);
+    }
+
+    #[test]
+    fn resolver_fixture_filters_target_and_expands_late_extras() {
+        #[derive(Deserialize)]
+        struct Fixture { roots: Vec<String>, packages: std::collections::HashMap<String, Vec<String>> }
+        let fixture: Fixture = serde_json::from_str(include_str!("fixtures/marker_graph.json")).unwrap();
+        let env = super::super::markers::linux_fixture();
+        let roots = applicable_dependencies(parse_requires_dist(&fixture.roots), &env, &[]).unwrap();
+        let mut queue: std::collections::VecDeque<_> = roots.into_iter().collect();
+        let mut state = ExpansionState::default();
+        let mut installed = std::collections::BTreeSet::new();
+        let mut expansions = 0;
+        while let Some(dep) = queue.pop_front() {
+            let Some((first, extras)) = state.activate(&dep) else { continue; };
+            expansions += 1;
+            assert!(expansions < 20, "cycles must terminate");
+            if first { assert!(installed.insert(dep.name.clone())); }
+            let metadata = fixture.packages.get(&dep.name).expect("excluded package must not be fetched");
+            queue.extend(applicable_dependencies(parse_requires_dist(metadata), &env, &extras).unwrap());
+        }
+        assert_eq!(installed.into_iter().collect::<Vec<_>>(), vec!["cli_tool", "cryptography", "later", "mcp", "pyjwt"]);
+        assert_eq!(expansions, 6, "pyjwt must be expanded again when crypto arrives after its base");
     }
 
     #[test]
@@ -733,6 +763,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (_, deps) = fetch_and_download_from(&base, "fixture", "1.0", "cp310", dir.path()).unwrap();
         server.join().unwrap();
+        let cached = crate::config::read_transitive_from_store(dir.path());
+        assert_eq!(cached.iter().map(|d| (&d.name, &d.version)).collect::<Vec<_>>(), deps.iter().map(|d| (&d.name, &d.version)).collect::<Vec<_>>());
         assert_eq!(deps.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), vec!["selected_dep"]);
     }
 

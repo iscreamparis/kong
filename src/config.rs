@@ -348,18 +348,12 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
             resolved_direct.push(d);
         }
 
-        let mut seen: HashMap<String, std::collections::BTreeSet<String>> = HashMap::new();
+        let mut expansion = crate::python::client::ExpansionState::default();
         let mut versions: HashMap<String, String> = resolved_direct.iter().map(|d| (d.name.clone(), d.version.clone())).collect();
         let mut queue: VecDeque<crate::python::parser::PythonDep> = resolved_direct.into_iter().collect();
 
         while let Some(dep) = queue.pop_front() {
-            let key = format!("{}-{}", dep.name.to_lowercase().replace('-', "_"), dep.version);
-            let first_visit = !seen.contains_key(&key);
-            let active_extras = seen.entry(key).or_default();
-            let mut added_extra = false;
-            for extra in &dep.extras { added_extra |= active_extras.insert(extra.clone()); }
-            if !first_visit && !added_extra { continue; }
-            let active_extras: Vec<String> = active_extras.iter().cloned().collect();
+            let Some((first_visit, active_extras)) = expansion.activate(&dep) else { continue; };
 
             let store_path = format!(
                 "python/libs/{}-{}-{}-{}",
@@ -733,7 +727,7 @@ pub fn short_python_tag(full_version: &str) -> String {
 
 /// Read `Requires-Dist` from an already-extracted wheel in the store.
 /// Used when the package is already cached so we don't re-download it.
-fn read_transitive_from_store(store_path: &std::path::Path) -> Vec<crate::python::client::TransitiveDep> {
+pub(crate) fn read_transitive_from_store(store_path: &std::path::Path) -> Vec<crate::python::client::TransitiveDep> {
     // The wheel is extracted flat: <store_path>/<PkgName>-<ver>.dist-info/METADATA
     let dist_info = match std::fs::read_dir(store_path) {
         Ok(rd) => rd,
