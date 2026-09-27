@@ -16,6 +16,7 @@ struct PypiPackageInfo {
 #[derive(Debug, Deserialize)]
 struct PypiInfo {
     requires_dist: Option<Vec<String>>,
+    requires_python: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,32 +47,22 @@ pub type TransitiveDep = super::parser::PythonDep;
 /// It is used to reject native wheels built for a different CPython
 /// version/ABI (e.g. a cp313t wheel must never be chosen for a cp310 runtime),
 /// so the wheel actually written matches the `cpXY` tag in the store dir name.
-pub fn fetch_and_download(name: &str, version: &str, target_py_tag: &str, store_path: &Path) -> Result<(FileInfo, Vec<TransitiveDep>)> {
-    fetch_and_download_from("https://pypi.org/pypi", name, version, target_py_tag, store_path)
+pub fn fetch_and_download(name: &str, version: &str, target_py_tag: &str, python_version: &str, store_path: &Path) -> Result<(FileInfo, Vec<TransitiveDep>)> {
+    fetch_and_download_from("https://pypi.org/pypi", name, version, target_py_tag, python_version, store_path)
 }
 
-fn fetch_and_download_from(registry: &str, name: &str, version: &str, target_py_tag: &str, store_path: &Path) -> Result<(FileInfo, Vec<TransitiveDep>)> {
-    let url = format!("{registry}/{name}/{version}/json");
-    debug!(url = %url, "Fetching PyPI metadata");
+fn fetch_and_download_from(registry: &str, name: &str, version: &str, target_py_tag: &str, python_version: &str, store_path: &Path) -> Result<(FileInfo, Vec<TransitiveDep>)> {
+    let info = release_metadata(registry, name, version)?;
 
-    let response = reqwest::blocking::get(&url)
-        .with_context(|| format!("failed to fetch PyPI metadata for {name}"))?;
-
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        bail!("package '{name}' not found on PyPI");
-    }
-
-    let info: PypiPackageInfo = response
-        .error_for_status()?
-        .json()
-        .with_context(|| format!("failed to parse PyPI response for {name}"))?;
-
+    anyhow::ensure!(supports_python(info.info.requires_python.as_deref(), python_version),
+        "{name}=={version} requires Python {}, target is {python_version}",
+        info.info.requires_python.as_deref().unwrap_or(""));
     let files = &info.urls;
 
     // Select best file: prefer a wheel COMPATIBLE with the target interpreter
     // (exact cpXY > abi3 > pure-python), then sdist. A wheel for a different
     // CPython version/ABI is rejected outright.
-    let file = select_best_file(files, target_py_tag)
+    let file = select_best_file(files, target_py_tag, python_version)
         .with_context(|| format!("no suitable file for {name}=={version} (target {target_py_tag})"))?;
 
     info!(filename = %file.filename, "Selected: {}", file.filename);
@@ -117,21 +108,34 @@ fn fetch_and_download_from(registry: &str, name: &str, version: &str, target_py_
     }, transitive))
 }
 
-/// Resolve the latest version of a package from PyPI (used as the last-resort
-/// fallback when a package has no applicable specifier).
-pub fn resolve_latest_version(name: &str) -> Result<String> {
-    #[derive(Deserialize)]
-    struct Info { version: String }
-    #[derive(Deserialize)]
-    struct Response { info: Info }
+fn release_metadata(registry: &str, name: &str, version: &str) -> Result<PypiPackageInfo> {
+    let url = format!("{registry}/{name}/{version}/json");
+    debug!(url = %url, "Fetching PyPI metadata");
 
-    let url = format!("https://pypi.org/pypi/{name}/json");
-    let resp: Response = reqwest::blocking::get(&url)
-        .with_context(|| format!("failed to fetch PyPI metadata for {name}"))?
+    let response = reqwest::blocking::get(&url)
+        .with_context(|| format!("failed to fetch PyPI metadata for {name}"))?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        bail!("package '{name}' not found on PyPI");
+    }
+
+    let info: PypiPackageInfo = response
+        .error_for_status()?
         .json()
         .with_context(|| format!("failed to parse PyPI response for {name}"))?;
-    Ok(resp.info.version)
+    Ok(info)
 }
+
+/// Test Requires-Python against the full managed interpreter version (not cpXY).
+/// Missing/empty metadata is unconstrained, as specified by PyPI.
+fn supports_python(requires_python: Option<&str>, python_version: &str) -> bool {
+    let Some(spec) = requires_python.filter(|s| !s.trim().is_empty()) else { return true; };
+    super::pep440::Version::parse(python_version)
+        .map(|version| super::pep440::SpecifierSet::parse(spec).matches(&version))
+        .unwrap_or(false)
+}
+
+
 
 /// List every release of a package from PyPI, each with its published files,
 /// filtering out yanked-only releases (those whose every file is yanked have an
@@ -168,13 +172,14 @@ fn list_releases(name: &str) -> Result<Vec<(String, Vec<PypiFileEntry>)>> {
 fn installable_versions(
     releases: &[(String, Vec<PypiFileEntry>)],
     target_py_tag: &str,
+    python_version: &str,
     platform_tag: &str,
     arch_suffix: &str,
 ) -> Vec<String> {
     releases
         .iter()
         .filter(|(_, files)| {
-            matches!(select_best_file_for(files, target_py_tag, platform_tag, arch_suffix),
+            matches!(select_best_file_for(files, target_py_tag, python_version, platform_tag, arch_suffix),
                      Some(f) if !is_sdist(f))
         })
         .map(|(v, _)| v.clone())
@@ -197,49 +202,48 @@ fn installable_versions(
 /// in range ships one — which is the normal case for pure-Python packages that
 /// publish an sdist alone, and those install fine.
 ///
-/// If nothing satisfies (a genuine conflict / impossible bound) we warn and fall
-/// back to the global latest so provisioning degrades rather than aborting.
+/// If nothing satisfies, fail rather than install a release that cannot run.
 pub fn resolve_best_version(
     name: &str,
     spec: &crate::python::pep440::SpecifierSet,
     target_py_tag: &str,
+    python_version: &str,
 ) -> Result<String> {
-    // An exact `==` pin needs no version listing — honor it directly.
-    if let Some(pin) = spec.exact_pin() {
-        debug!(pkg = %name, ver = %pin, "Exact pin — using as-is");
-        return Ok(pin);
+    let mut releases = list_releases(name)?;
+    loop {
+        let version = resolve_from_releases(name, spec, target_py_tag, python_version, &releases)?;
+        // Aggregate info describes only the latest release. Fetch the chosen
+        // release's own info, including on warm runs, before trusting the store.
+        let metadata = release_metadata("https://pypi.org/pypi", name, &version)?;
+        if supports_python(metadata.info.requires_python.as_deref(), python_version)
+            && select_best_file(&metadata.urls, target_py_tag, python_version).is_some() {
+            return Ok(version);
+        }
+        releases.retain(|(v, _)| v != &version);
     }
+}
 
-    let releases = list_releases(name)?;
+fn resolve_from_releases(
+    name: &str,
+    spec: &super::pep440::SpecifierSet,
+    target_py_tag: &str,
+    python_version: &str,
+    releases: &[(String, Vec<PypiFileEntry>)],
+) -> Result<String> {
     let installable = installable_versions(
-        &releases,
-        target_py_tag,
-        &current_platform_tag(),
-        &current_arch_suffix(),
+        releases, target_py_tag, python_version,
+        &current_platform_tag(), &current_arch_suffix(),
     );
-
-    if let Some(best) = crate::python::pep440::select_best(&installable, spec) {
-        debug!(pkg = %name, ver = %best, "Selected highest wheel-shipping version satisfying specifier");
+    if let Some(best) = super::pep440::select_best(&installable, spec) {
         return Ok(best.to_string());
     }
-
-    // No release in range ships a usable wheel. Fall back to the highest satisfying
-    // version regardless of artifact: a pure-Python sdist installs fine, and a
-    // compiled one fails LOUDLY in install_sdist rather than silently degrading.
-    let all: Vec<String> = releases.into_iter().map(|(v, _)| v).collect();
-    if let Some(best) = crate::python::pep440::select_best(&all, spec) {
-        debug!(pkg = %name, ver = %best, "No wheel in range — selected highest satisfying version (sdist path)");
-        return Ok(best.to_string());
-    }
-
-    // Nothing satisfied the constraint. This is either an unsatisfiable bound or
-    // a version PyPI lists in a form we couldn't parse. Be loud, then degrade.
-    tracing::warn!(
-        pkg = %name,
-        "No released version satisfies the constraint; falling back to latest \
-         (provisioning may need a manual pin)"
-    );
-    resolve_latest_version(name)
+    // The sdist fallback obeys the same interpreter gate. Never fall back to
+    // global latest: that would bypass both Requires-Python and an exact pin.
+    let compatible: Vec<String> = releases.iter()
+        .filter(|(_, files)| select_best_file(files, target_py_tag, python_version).is_some())
+        .map(|(v, _)| v.clone()).collect();
+    super::pep440::select_best(&compatible, spec).map(str::to_owned)
+        .with_context(|| format!("no compatible release of {name} satisfies the requirement for Python {python_version}"))
 }
 
 /// Parse cold and cached metadata identically; filter only when the target and extras are known.
@@ -308,8 +312,8 @@ fn is_sdist(file: &PypiFileEntry) -> bool {
 /// Preference order (most specific → least): exact `cpXY` (+abi) > `abi3`
 /// (forward-compatible stable ABI, `cpXY`..target) > pure-python (`py3`/`none`).
 /// Ties break deterministically on filename so the same wheel is always chosen.
-fn select_best_file<'a>(files: &'a [PypiFileEntry], target_py_tag: &str) -> Option<&'a PypiFileEntry> {
-    select_best_file_for(files, target_py_tag, &current_platform_tag(), &current_arch_suffix())
+fn select_best_file<'a>(files: &'a [PypiFileEntry], target_py_tag: &str, python_version: &str) -> Option<&'a PypiFileEntry> {
+    select_best_file_for(files, target_py_tag, python_version, &current_platform_tag(), &current_arch_suffix())
 }
 
 /// Core selection — platform tags are passed in so it is host-independent and
@@ -317,13 +321,14 @@ fn select_best_file<'a>(files: &'a [PypiFileEntry], target_py_tag: &str) -> Opti
 fn select_best_file_for<'a>(
     files: &'a [PypiFileEntry],
     target_py_tag: &str,
+    python_version: &str,
     platform_tag: &str,
     arch_suffix: &str,
 ) -> Option<&'a PypiFileEntry> {
     let target = TargetTag::parse(target_py_tag);
 
     let mut best: Option<(i32, &PypiFileEntry)> = None;
-    for f in files.iter().filter(|f| f.packagetype == "bdist_wheel") {
+    for f in files.iter().filter(|f| f.packagetype == "bdist_wheel" && supports_python(f.requires_python.as_deref(), python_version)) {
         if let Some(score) = score_wheel(&f.filename, &target, platform_tag, arch_suffix) {
             let better = match best {
                 None => true,
@@ -340,7 +345,7 @@ fn select_best_file_for<'a>(
     }
 
     // No compatible wheel — fall back to a source dist (built locally if able).
-    files.iter().find(|f| f.packagetype == "sdist")
+    files.iter().find(|f| f.packagetype == "sdist" && supports_python(f.requires_python.as_deref(), python_version))
 }
 
 /// The target interpreter's wheel tag, parsed once. e.g. "cp310" → cp/3/10.
@@ -659,7 +664,7 @@ mod tests {
         let releases: std::collections::HashMap<String, Vec<PypiFileEntry>> =
             serde_json::from_str(include_str!("fixtures/requires_python.json")).unwrap();
         let releases: Vec<_> = releases.into_iter().collect();
-        let available = installable_versions(&releases, "cp310", PLAT, ARCH);
+        let available = installable_versions(&releases, "cp310", "3.10.21", PLAT, ARCH);
         assert_eq!(crate::python::pep440::select_best(&available,
             &crate::python::pep440::SpecifierSet::parse("")), Some("1.0"));
     }
@@ -686,7 +691,7 @@ mod tests {
                 vec![entry("pglast-7.14-cp310-cp310-manylinux2014_x86_64.whl")],
             ),
         ];
-        let got = installable_versions(&releases, "cp310", PLAT, ARCH);
+        let got = installable_versions(&releases, "cp310", "3.10.21", PLAT, ARCH);
         assert!(!got.contains(&"7.16".to_string()), "sdist-only release must not be a candidate");
         assert!(got.contains(&"7.15".to_string()));
         assert!(got.contains(&"7.14".to_string()));
@@ -703,14 +708,14 @@ mod tests {
             "9.9".to_string(),
             vec![entry("pkg-9.9-cp313-cp313-manylinux2014_x86_64.whl")],
         )];
-        assert!(installable_versions(&releases, "cp310", PLAT, ARCH).is_empty());
+        assert!(installable_versions(&releases, "cp310", "3.10.21", PLAT, ARCH).is_empty());
     }
 
     // Pure-python projects that publish a py3-none-any wheel stay installable.
     #[test]
     fn pure_python_wheel_is_installable() {
         let releases = vec![("1.2".to_string(), vec![entry("pkg-1.2-py3-none-any.whl")])];
-        assert_eq!(installable_versions(&releases, "cp310", PLAT, ARCH), vec!["1.2".to_string()]);
+        assert_eq!(installable_versions(&releases, "cp310", "3.10.21", PLAT, ARCH), vec!["1.2".to_string()]);
     }
 
     #[test]
@@ -771,7 +776,7 @@ mod tests {
             }
         });
         let dir = tempfile::tempdir().unwrap();
-        let (_, deps) = fetch_and_download_from(&base, "fixture", "1.0", "cp310", dir.path()).unwrap();
+        let (_, deps) = fetch_and_download_from(&base, "fixture", "1.0", "cp310", "3.10.21", dir.path()).unwrap();
         server.join().unwrap();
         let cached = crate::config::read_transitive_from_store(dir.path());
         assert_eq!(cached.iter().map(|d| (&d.name, &d.version)).collect::<Vec<_>>(), deps.iter().map(|d| (&d.name, &d.version)).collect::<Vec<_>>());
@@ -835,7 +840,7 @@ mod tests {
             entry("bcrypt-4.3.0-cp312-cp312-manylinux2014_x86_64.whl"),
             sdist("bcrypt-4.3.0.tar.gz"),
         ];
-        let chosen = select_best_file_for(&files, "cp310", PLAT, ARCH).expect("a compatible wheel exists");
+        let chosen = select_best_file_for(&files, "cp310", "3.10.21", PLAT, ARCH).expect("a compatible wheel exists");
         assert_eq!(chosen.filename, "bcrypt-4.3.0-cp310-cp310-manylinux2014_x86_64.whl");
     }
 
@@ -867,7 +872,7 @@ mod tests {
             entry("foo-1.0-cp37-abi3-manylinux2014_x86_64.whl"),
             entry("foo-1.0-cp310-cp310-manylinux2014_x86_64.whl"),
         ];
-        let chosen = select_best_file_for(&files, "cp310", PLAT, ARCH).unwrap();
+        let chosen = select_best_file_for(&files, "cp310", "3.10.21", PLAT, ARCH).unwrap();
         assert_eq!(chosen.filename, "foo-1.0-cp310-cp310-manylinux2014_x86_64.whl");
     }
 
@@ -882,7 +887,7 @@ mod tests {
             entry("requests-2.31.0-py3-none-any.whl"),
             entry("requests-2.31.0-cp310-cp310-manylinux2014_x86_64.whl"),
         ];
-        let chosen = select_best_file_for(&files, "cp310", PLAT, ARCH).unwrap();
+        let chosen = select_best_file_for(&files, "cp310", "3.10.21", PLAT, ARCH).unwrap();
         assert_eq!(chosen.filename, "requests-2.31.0-cp310-cp310-manylinux2014_x86_64.whl");
     }
 
@@ -892,7 +897,7 @@ mod tests {
             entry("foo-1.0-cp39-cp39-manylinux2014_x86_64.whl"),
             entry("foo-1.0-py3-none-any.whl"),
         ];
-        let chosen = select_best_file_for(&files, "cp310", PLAT, ARCH).unwrap();
+        let chosen = select_best_file_for(&files, "cp310", "3.10.21", PLAT, ARCH).unwrap();
         assert_eq!(chosen.filename, "foo-1.0-py3-none-any.whl");
     }
 
@@ -926,7 +931,7 @@ mod tests {
             entry("foo-1.0-cp313-cp313t-manylinux2014_x86_64.whl"),
             sdist("foo-1.0.tar.gz"),
         ];
-        let chosen = select_best_file_for(&files, "cp310", PLAT, ARCH).expect("sdist fallback");
+        let chosen = select_best_file_for(&files, "cp310", "3.10.21", PLAT, ARCH).expect("sdist fallback");
         assert_eq!(chosen.filename, "foo-1.0.tar.gz");
     }
 
@@ -1016,7 +1021,7 @@ mod tests {
             entry("pkg-1.0-cp310-cp310-win_amd64.whl"),
             entry("pkg-1.0-cp310-cp310-manylinux2014_x86_64.whl"),
         ];
-        let chosen = select_best_file_for(&files, "cp310", PLAT, ARCH)
+        let chosen = select_best_file_for(&files, "cp310", "3.10.21", PLAT, ARCH)
             .expect("the manylinux wheel must be selected");
         assert_eq!(chosen.filename, "pkg-1.0-cp310-cp310-manylinux2014_x86_64.whl");
     }
@@ -1064,7 +1069,7 @@ mod tests {
             entry("pkg-1.0-cp310-cp310-win_amd64.whl"),
             entry("pkg-1.0-cp310-cp310-macosx_11_0_arm64.whl"),
         ];
-        let chosen = select_best_file_for(&files, "cp310", MAC_PLAT, MAC_ARCH)
+        let chosen = select_best_file_for(&files, "cp310", "3.10.21", MAC_PLAT, MAC_ARCH)
             .expect("darwin arm64 wheel must be selected on a mac target");
         assert_eq!(chosen.filename, "pkg-1.0-cp310-cp310-macosx_11_0_arm64.whl");
     }
