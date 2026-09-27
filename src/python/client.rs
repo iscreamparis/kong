@@ -654,6 +654,16 @@ mod tests {
         TargetTag::parse(tag)
     }
 
+    #[test]
+    fn requires_python_fixture_excludes_newer_interpreter_releases() {
+        let releases: std::collections::HashMap<String, Vec<PypiFileEntry>> =
+            serde_json::from_str(include_str!("fixtures/requires_python.json")).unwrap();
+        let releases: Vec<_> = releases.into_iter().collect();
+        let available = installable_versions(&releases, "cp310", PLAT, ARCH);
+        assert_eq!(crate::python::pep440::select_best(&available,
+            &crate::python::pep440::SpecifierSet::parse("")), Some("1.0"));
+    }
+
     // ── artifact-aware version candidacy ─────────────────────────────────────
     // Regression: pglast>=6,<8 resolved to 7.16, whose ONLY artifact is a compiled
     // sdist, so the build aborted even though 7.15 ships a cp310 manylinux wheel.
