@@ -304,6 +304,8 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
         info!("Found Python dependencies — ensuring runtime");
         let runtime = crate::python::runtime::ensure_runtime(&store_root, "latest")?;
         let py_tag = short_python_tag(&runtime.version); // e.g. "cp312"
+        let marker_env = crate::python::markers::MarkerEnvironment::from_interpreter(&runtime._python_exe)?;
+        let python_deps = crate::python::client::applicable_dependencies(python_deps, &marker_env, &[])?;
 
         info!(count = python_deps.len(), version = %runtime.version, "Processing Python packages");
         let mut packages = Vec::new();
@@ -346,21 +348,19 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
             resolved_direct.push(d);
         }
 
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut expansion = crate::python::client::ExpansionState::default();
+        let mut versions: HashMap<String, String> = resolved_direct.iter().map(|d| (d.name.clone(), d.version.clone())).collect();
         let mut queue: VecDeque<crate::python::parser::PythonDep> = resolved_direct.into_iter().collect();
 
         while let Some(dep) = queue.pop_front() {
-            let key = format!("{}-{}", dep.name.to_lowercase().replace('-', "_"), dep.version);
-            if !seen.insert(key) {
-                continue; // already processed
-            }
+            let Some((first_visit, active_extras)) = expansion.activate(&dep) else { continue; };
 
             let store_path = format!(
                 "python/libs/{}-{}-{}-{}",
                 dep.name, dep.version, py_tag, platform
             );
             let full_store_path = store_root.join(&store_path);
-            let transitive = if !full_store_path.exists() || force {
+            let transitive = if !full_store_path.exists() || (force && first_visit) {
                 let (file_info, trans) = crate::python::client::fetch_and_download(
                     &dep.name, &dep.version, &py_tag, &full_store_path,
                 )?;
@@ -374,13 +374,12 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
                 trans
             } else {
                 debug!(pkg = %dep.name, ver = %dep.version, "Already in store, skipping");
-                packages.push(PackageEntry {
-                    name: dep.name.clone(),
-                    version: dep.version.clone(),
-                    hash: None,
-                    store_path,
-                    source_url: None,
-                });
+                if first_visit {
+                    packages.push(PackageEntry {
+                        name: dep.name.clone(), version: dep.version.clone(), hash: None,
+                        store_path, source_url: None,
+                    });
+                }
                 // Still need transitive deps — read from already-extracted METADATA
                 read_transitive_from_store(&store_root.join(format!(
                     "python/libs/{}-{}-{}-{}",
@@ -389,7 +388,7 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
             };
 
             // Enqueue transitive deps not yet seen.
-            for t in transitive {
+            for t in crate::python::client::applicable_dependencies(transitive, &marker_env, &active_extras)? {
                 let norm = normalize_python_name(&t.name);
 
                 // Record the parent-declared bound into the accumulated set for
@@ -404,14 +403,7 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
                     }
                 }
 
-                let t_key = t.name.to_lowercase().replace('-', "_");
-                // Exact name match (ignoring version) — don't re-process any version of same pkg.
-                if seen.iter().any(|s| {
-                    let s_name = s.split('-').next().unwrap_or(s);
-                    s_name == t_key
-                }) {
-                    continue;
-                }
+
 
                 // Resolve to the highest version satisfying the AND of all
                 // constraints seen for this package (an exact `==` short-circuits
@@ -419,14 +411,17 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
                 // logged and falls back to latest rather than aborting). The py tag
                 // keeps the choice to versions this interpreter has a wheel for.
                 let spec = constraints.get(&norm).cloned().unwrap_or_default();
-                let version = match crate::python::client::resolve_best_version(&t.name, &spec, &py_tag) {
-                    Ok(v) => v,
-                    Err(e) => { tracing::warn!(pkg = %t.name, "Could not resolve version: {e}"); continue; }
+                let version = if let Some(v) = versions.get(&norm) { v.clone() } else {
+                    let v = crate::python::client::resolve_best_version(&t.name, &spec, &py_tag)?;
+                    versions.insert(norm.clone(), v.clone());
+                    v
                 };
                 queue.push_back(crate::python::parser::PythonDep {
                     name: t.name,
                     version,
                     spec: String::new(),
+                    marker: String::new(),
+                    extras: t.extras,
                 });
             }
         }
@@ -732,7 +727,7 @@ pub fn short_python_tag(full_version: &str) -> String {
 
 /// Read `Requires-Dist` from an already-extracted wheel in the store.
 /// Used when the package is already cached so we don't re-download it.
-fn read_transitive_from_store(store_path: &std::path::Path) -> Vec<crate::python::client::TransitiveDep> {
+pub(crate) fn read_transitive_from_store(store_path: &std::path::Path) -> Vec<crate::python::client::TransitiveDep> {
     // The wheel is extracted flat: <store_path>/<PkgName>-<ver>.dist-info/METADATA
     let dist_info = match std::fs::read_dir(store_path) {
         Ok(rd) => rd,

@@ -10,7 +10,7 @@ use crate::download::{self, FileInfo};
 #[derive(Debug, Deserialize)]
 struct PypiPackageInfo {
     info: PypiInfo,
-    releases: std::collections::HashMap<String, Vec<PypiFileEntry>>,
+    urls: Vec<PypiFileEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,19 +35,8 @@ struct PypiDigests {
     sha256: String,
 }
 
-/// A transitive dependency discovered from a wheel's `Requires-Dist`.
-///
-/// `version` is a concrete pin ONLY when the parent declared an exact `==X.Y.Z`
-/// (with no wildcard); otherwise it is empty and `spec` carries the original
-/// PEP 440 specifier (`>=2.10,<3`, `~=1.4`, …) so the resolver can pick the
-/// highest version that actually satisfies the bound — not the global latest.
-#[derive(Debug, Clone)]
-pub struct TransitiveDep {
-    pub name: String,
-    pub version: String,
-    /// The raw specifier string as declared by the parent (may be empty).
-    pub spec: String,
-}
+/// Requirements retain markers and requested extras until the target is known.
+pub type TransitiveDep = super::parser::PythonDep;
 
 /// Fetch metadata from PyPI, download the best wheel, and extract to store.
 /// Returns the file info plus any transitive dependencies found in wheel METADATA.
@@ -58,7 +47,11 @@ pub struct TransitiveDep {
 /// version/ABI (e.g. a cp313t wheel must never be chosen for a cp310 runtime),
 /// so the wheel actually written matches the `cpXY` tag in the store dir name.
 pub fn fetch_and_download(name: &str, version: &str, target_py_tag: &str, store_path: &Path) -> Result<(FileInfo, Vec<TransitiveDep>)> {
-    let url = format!("https://pypi.org/pypi/{name}/json");
+    fetch_and_download_from("https://pypi.org/pypi", name, version, target_py_tag, store_path)
+}
+
+fn fetch_and_download_from(registry: &str, name: &str, version: &str, target_py_tag: &str, store_path: &Path) -> Result<(FileInfo, Vec<TransitiveDep>)> {
+    let url = format!("{registry}/{name}/{version}/json");
     debug!(url = %url, "Fetching PyPI metadata");
 
     let response = reqwest::blocking::get(&url)
@@ -69,13 +62,11 @@ pub fn fetch_and_download(name: &str, version: &str, target_py_tag: &str, store_
     }
 
     let info: PypiPackageInfo = response
+        .error_for_status()?
         .json()
         .with_context(|| format!("failed to parse PyPI response for {name}"))?;
 
-    let files = info
-        .releases
-        .get(version)
-        .with_context(|| format!("version '{version}' not found for '{name}' on PyPI"))?;
+    let files = &info.urls;
 
     // Select best file: prefer a wheel COMPATIBLE with the target interpreter
     // (exact cpXY > abi3 > pure-python), then sdist. A wheel for a different
@@ -116,8 +107,8 @@ pub fn fetch_and_download(name: &str, version: &str, target_py_tag: &str, store_
     }
     crate::store::write_verified_marker(store_path, &result.hash)?;
 
-    // Collect transitive deps from PyPI info.requires_dist (more reliable than
-    // reading the extracted METADATA file — same data, no filesystem walk).
+    // This is the SELECTED release's metadata, not /<name>/json's latest release.
+    // Keep markers and extras until the resolver evaluates the target environment.
     let transitive = parse_requires_dist(&requires_dist);
 
     Ok((FileInfo {
@@ -251,71 +242,39 @@ pub fn resolve_best_version(
     resolve_latest_version(name)
 }
 
-/// Parse `Requires-Dist` lines — public alias so config.rs can call it for
-/// already-cached packages.
+/// Parse cold and cached metadata identically; filter only when the target and extras are known.
 pub fn parse_requires_dist_pub(entries: &[String]) -> Vec<TransitiveDep> {
     parse_requires_dist(entries)
 }
-
-/// Parse `Requires-Dist` lines from PyPI `info.requires_dist`.
-/// Skips extras (conditional deps like `extra == "async"`) and environment
-/// markers that would exclude this platform. Returns the dependency name, an
-/// exact pin if the parent declared one (`==X.Y.Z`), and the RAW PEP 440
-/// specifier string so the resolver can pick the highest satisfying version.
-///
-/// A bracketed extras request on the dependency itself (`requests[security]`)
-/// has the `[...]` stripped — we resolve the base package and let its own
-/// `Requires-Dist` surface any extra-gated deps (which we skip, matching pip's
-/// default no-extras behaviour for transitive resolution here).
 fn parse_requires_dist(entries: &[String]) -> Vec<TransitiveDep> {
-    let mut deps = Vec::new();
-    for entry in entries {
-        // Skip anything with "extra ==" — those are optional deps
-        if entry.contains("extra ==") || entry.contains("extra==") {
-            continue;
-        }
-        // Strip environment markers (semicolon and after)
-        let body = if let Some(idx) = entry.find(';') {
-            entry[..idx].trim()
-        } else {
-            entry.trim()
-        };
-        // Parse "Name>=version,<other" — split the name (incl. optional [extras])
-        // from the specifier. The name runs until the first specifier operator
-        // or whitespace; brackets are part of the name token.
-        let name_end = body
-            .find(|c: char| {
-                !c.is_alphanumeric() && c != '-' && c != '_' && c != '.' && c != '[' && c != ']'
-            })
-            .unwrap_or(body.len());
-        // Drop any [extras] suffix from the resolved package name.
-        let raw_name = body[..name_end].trim();
-        let dep_name = match raw_name.find('[') {
-            Some(b) => raw_name[..b].trim().to_string(),
-            None => raw_name.to_string(),
-        };
-        if dep_name.is_empty() {
-            continue;
-        }
-        let spec_str = body[name_end..].trim().to_string();
-        // Honor an exact pin directly; otherwise carry the raw specifier.
-        let version = extract_exact_pin(&spec_str).unwrap_or_default();
-        deps.push(TransitiveDep {
-            name: dep_name,
-            version,
-            spec: spec_str,
-        });
-    }
-    deps
+    entries.iter().filter_map(|s| super::parser::parse_requirement_line(s)).collect()
 }
 
-/// Extract a concrete version from a specifier ONLY when it is a single exact,
-/// non-wildcard `==X.Y.Z` pin. For >= / ~= / ==X.* / ranges → None, so the
-/// caller resolves the highest satisfying version via the specifier set.
-fn extract_exact_pin(spec: &str) -> Option<String> {
-    let set = crate::python::pep440::SpecifierSet::parse(spec);
-    set.exact_pin()
+/// Remember expansion per selected release, revisiting it only for newly requested extras.
+#[derive(Default)]
+pub struct ExpansionState(std::collections::HashMap<String, std::collections::BTreeSet<String>>);
+impl ExpansionState {
+    pub fn activate(&mut self, dep: &TransitiveDep) -> Option<(bool, Vec<String>)> {
+        let key = format!("{}=={}", dep.name, dep.version);
+        let first_visit = !self.0.contains_key(&key);
+        let active = self.0.entry(key).or_default();
+        let mut changed = false;
+        for extra in &dep.extras { changed |= active.insert(extra.clone()); }
+        if !first_visit && !changed { return None; }
+        Some((first_visit, active.iter().cloned().collect()))
+    }
 }
+
+pub fn applicable_dependencies(deps: Vec<TransitiveDep>, env: &super::markers::MarkerEnvironment, extras: &[String]) -> Result<Vec<TransitiveDep>> {
+    let mut result = Vec::new();
+    for dep in deps {
+        if env.evaluate(&dep.marker, extras).with_context(|| format!("invalid marker for {}: {}", dep.name, dep.marker))? {
+            result.push(dep);
+        }
+    }
+    Ok(result)
+}
+
 
 /// Is the selected PyPI file a source distribution (sdist) rather than a wheel?
 ///
@@ -742,6 +701,71 @@ mod tests {
     fn pure_python_wheel_is_installable() {
         let releases = vec![("1.2".to_string(), vec![entry("pkg-1.2-py3-none-any.whl")])];
         assert_eq!(installable_versions(&releases, "cp310", PLAT, ARCH), vec!["1.2".to_string()]);
+    }
+
+    #[test]
+    fn markers_fixture_skips_windows_dependency() {
+        let entries = vec!["pywin32>=311; sys_platform == 'win32'".into(), "anyio>=4".into()];
+        let deps = applicable_dependencies(parse_requires_dist(&entries), &super::super::markers::linux_fixture(), &[]).unwrap();
+        assert_eq!(deps.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), vec!["anyio"]);
+    }
+
+    #[test]
+    fn resolver_fixture_filters_target_and_expands_late_extras() {
+        #[derive(Deserialize)]
+        struct Fixture { roots: Vec<String>, packages: std::collections::HashMap<String, Vec<String>> }
+        let fixture: Fixture = serde_json::from_str(include_str!("fixtures/marker_graph.json")).unwrap();
+        let env = super::super::markers::linux_fixture();
+        let roots = applicable_dependencies(parse_requires_dist(&fixture.roots), &env, &[]).unwrap();
+        let mut queue: std::collections::VecDeque<_> = roots.into_iter().collect();
+        let mut state = ExpansionState::default();
+        let mut installed = std::collections::BTreeSet::new();
+        let mut expansions = 0;
+        while let Some(dep) = queue.pop_front() {
+            let Some((first, extras)) = state.activate(&dep) else { continue; };
+            expansions += 1;
+            assert!(expansions < 20, "cycles must terminate");
+            if first { assert!(installed.insert(dep.name.clone())); }
+            let metadata = fixture.packages.get(&dep.name).expect("excluded package must not be fetched");
+            queue.extend(applicable_dependencies(parse_requires_dist(metadata), &env, &extras).unwrap());
+        }
+        assert_eq!(installed.into_iter().collect::<Vec<_>>(), vec!["cli_tool", "cryptography", "later", "mcp", "pyjwt"]);
+        assert_eq!(expansions, 6, "pyjwt must be expanded again when crypto arrives after its base");
+    }
+
+    #[test]
+    fn selected_release_metadata_not_latest() {
+        use std::io::{Read, Write};
+        use sha2::{Digest, Sha256};
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("fixture-1.0.dist-info/METADATA", zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(b"Name: fixture\nVersion: 1.0\nRequires-Dist: selected_dep==1.0\n").unwrap();
+        let wheel = zip.finish().unwrap().into_inner();
+        let hash = hex::encode(Sha256::digest(&wheel));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let file = serde_json::json!({"filename":"fixture-1.0-py3-none-any.whl", "url":format!("{base}/wheel.whl"), "digests":{"sha256":hash}, "packagetype":"bdist_wheel"});
+        let latest = serde_json::json!({"info":{"requires_dist":["latest_only==9"]}, "releases":{"1.0":[file.clone()]}}).to_string();
+        let selected = serde_json::json!({"info":{"requires_dist":["selected_dep==1.0"]}, "urls":[file]}).to_string();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                let n = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..n]);
+                let body = if request.starts_with("GET /wheel.whl ") { wheel.clone() }
+                    else if request.starts_with("GET /fixture/1.0/json ") { selected.as_bytes().to_vec() }
+                    else { latest.as_bytes().to_vec() };
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let (_, deps) = fetch_and_download_from(&base, "fixture", "1.0", "cp310", dir.path()).unwrap();
+        server.join().unwrap();
+        let cached = crate::config::read_transitive_from_store(dir.path());
+        assert_eq!(cached.iter().map(|d| (&d.name, &d.version)).collect::<Vec<_>>(), deps.iter().map(|d| (&d.name, &d.version)).collect::<Vec<_>>());
+        assert_eq!(deps.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), vec!["selected_dep"]);
     }
 
     // ── sdist vs wheel detection ─────────────────────────────────────────────
