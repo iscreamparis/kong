@@ -1,0 +1,4 @@
+{
+  "1.0": [{"filename":"fixture-1.0-py3-none-any.whl","url":"https://example/fixture-1.0-py3-none-any.whl","digests":{"sha256":""},"packagetype":"bdist_wheel","requires_python":">=3.10"}],
+  "2.0": [{"filename":"fixture-2.0-py3-none-any.whl","url":"https://example/fixture-2.0-py3-none-any.whl","digests":{"sha256":""},"packagetype":"bdist_wheel","requires_python":">=3.11"}]
+}

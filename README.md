@@ -514,7 +514,7 @@ KONG is early-stage software. Here's what doesn't work yet — no surprises.
 ### Python
 - **Target markers and extras:** requirements.txt / PEP 621 dependencies and transitive `Requires-Dist` markers are evaluated against the managed interpreter, not a Python on PATH. Boolean expressions, version comparisons and requested extras are honored, including extras discovered after the base package was expanded. Invalid markers fail with the requirement name. Downloads use the selected release's metadata. This does not add SAT/backtracking resolution or platform selection for universal lockfile graphs.
 - **No sdist compilation.** KONG downloads pre-built wheels only. If a package has no wheel for your platform (rare for popular packages, common for niche ones), it will download the source tarball but won't compile C extensions. Packages like `numpy`, `flask`, `requests` ship wheels and work fine.
-- **`requires_python` not checked.** A package requiring Python 3.11+ will be selected even if KONG manages Python 3.10.
+- **Requires-Python:** PyPI JSON release/file constraints are checked against the full managed interpreter version, including exact pins, transitives, sdist fallback and warm-store reuse. Incompatible releases are skipped; impossible bounds fail instead of falling back to global latest. Kong currently uses the PyPI JSON API, not the PEP 503 HTML simple index.
 - **Version ranges not resolved.** `>=1.0` or `~=2.3` in `requirements.txt` are skipped — only exact pins (`==`) and lockfile versions are handled. Use a lockfile for reliable results.
 
 ### Node.js
