@@ -341,7 +341,9 @@ fn is_sdist(file: &PypiFileEntry) -> bool {
 /// `target_py_tag` (e.g. "cp310") — no package names are special-cased.
 ///
 /// Preference order (most specific → least): exact `cpXY` (+abi) > `abi3`
-/// (forward-compatible stable ABI, `cpXY`..target) > pure-python (`py3`/`none`).
+/// (forward-compatible stable ABI, `cpXY`..target) > platform-specific
+/// `py3-none-<platform>` (native executable, no extension) > pure-python
+/// (`py3-none-any`).
 /// Ties break deterministically on filename so the same wheel is always chosen.
 fn select_best_file<'a>(files: &'a [PypiFileEntry], target_py_tag: &str, python_version: &str) -> Option<&'a PypiFileEntry> {
     select_best_file_for(files, target_py_tag, python_version, &current_platform_tag(), &current_arch_suffix())
@@ -636,6 +638,19 @@ fn score_py_abi(py: &str, abi: &str, target: &TargetTag, is_pure: bool) -> Optio
             "py2.py3" => return Some(45),
             // "py30".."py3X" style major-only sometimes appears; accept py3 family.
             p if p.starts_with("py3") => return Some(48),
+            _ => {}
+        }
+    }
+
+    // 4. Platform-specific, interpreter-agnostic wheels: `py3-none-<platform>`
+    //    (ninja, cmake, uv ship a native executable, not an extension module).
+    //    The caller has already verified the platform tag against the target, so
+    //    any CPython 3 can install them. Ranked below every cpXY/abi3 match and
+    //    above a pure `py3-none-any` wheel (and therefore above an sdist).
+    if abi == "none" && !is_pure {
+        match py {
+            "py3" | "cp3" => return Some(60),
+            p if p.starts_with("py3") => return Some(58),
             _ => {}
         }
     }
@@ -1127,6 +1142,75 @@ mod tests {
             None
         );
         assert!(score_wheel("pkg-1.0-py3-none-any.whl", &t, WIN_PLAT, WIN_ARCH).is_some());
+    }
+
+    // ── py3-none-<platform> wheels (ninja / cmake / uv) ──────────────────────
+    // These carry a native executable but no extension module, so they install
+    // on any CPython 3 whose platform matches. They used to be rejected because
+    // abi "none" was only accepted for `any`, forcing an sdist fallback.
+    const NINJA_LINUX: &str = "ninja-1.13.2-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl";
+
+    #[test]
+    fn py3_none_any_keeps_its_score() {
+        let t = target("cp311");
+        assert_eq!(score_wheel("pkg-1.0-py3-none-any.whl", &t, PLAT, ARCH), Some(50));
+    }
+
+    #[test]
+    fn accepts_py3_none_manylinux_on_linux() {
+        let t = target("cp311");
+        let s = score_wheel(NINJA_LINUX, &t, PLAT, ARCH).expect("py3-none-manylinux must install on linux");
+        assert!(s > 50 && s < 70, "between pure/sdist and any cpXY/abi3 match, got {s}");
+        let files = vec![
+            sdist("ninja-1.13.2.tar.gz"),
+            entry("ninja-1.13.2-py3-none-win_amd64.whl"),
+            entry("ninja-1.13.2-py3-none-macosx_10_9_universal2.whl"),
+            entry(NINJA_LINUX),
+            entry("ninja-1.13.2-py3-none-musllinux_1_2_aarch64.whl"),
+        ];
+        let chosen = select_best_file_for(&files, "cp311", "3.11.9", PLAT, ARCH).unwrap();
+        assert_eq!(chosen.filename, NINJA_LINUX);
+        let releases = vec![("1.13.2".to_string(), files)];
+        assert_eq!(installable_versions(&releases, "cp311", "3.11.9", PLAT, ARCH), vec!["1.13.2".to_string()]);
+    }
+
+    #[test]
+    fn accepts_py3_none_win_amd64_on_windows() {
+        let t = target("cp311");
+        let files = vec![
+            sdist("ninja-1.13.2.tar.gz"),
+            entry(NINJA_LINUX),
+            entry("ninja-1.13.2-py3-none-win_amd64.whl"),
+        ];
+        assert!(score_wheel("ninja-1.13.2-py3-none-win_amd64.whl", &t, "win_amd64", "amd64.whl").is_some());
+        let chosen = select_best_file_for(&files, "cp311", "3.11.9", "win_amd64", "amd64.whl").unwrap();
+        assert_eq!(chosen.filename, "ninja-1.13.2-py3-none-win_amd64.whl");
+    }
+
+    #[test]
+    fn rejects_py3_none_wheel_for_wrong_platform() {
+        let t = target("cp311");
+        assert_eq!(score_wheel("ninja-1.13.2-py3-none-win_amd64.whl", &t, PLAT, ARCH), None);
+        assert_eq!(score_wheel("ninja-1.13.2-py3-none-macosx_10_9_x86_64.whl", &t, PLAT, ARCH), None);
+        assert_eq!(score_wheel("ninja-1.13.2-py3-none-manylinux2014_aarch64.whl", &t, PLAT, ARCH), None);
+        // Python 2-only tag is still not accepted.
+        assert_eq!(score_wheel("pkg-1.0-py2-none-manylinux2014_x86_64.whl", &t, PLAT, ARCH), None);
+        // Only wrong-platform wheels: falls back to the sdist.
+        let files = vec![entry("ninja-1.13.2-py3-none-win_amd64.whl"), sdist("ninja-1.13.2.tar.gz")];
+        assert_eq!(select_best_file_for(&files, "cp311", "3.11.9", PLAT, ARCH).unwrap().filename, "ninja-1.13.2.tar.gz");
+    }
+
+    #[test]
+    fn cp311_still_preferred_over_py3_none_platform_wheel() {
+        let files = vec![
+            entry(NINJA_LINUX),
+            entry("pkg-1.0-py3-none-any.whl"),
+            entry("pkg-1.0-cp311-cp311-manylinux2014_x86_64.whl"),
+        ];
+        let chosen = select_best_file_for(&files, "cp311", "3.11.9", PLAT, ARCH).unwrap();
+        assert_eq!(chosen.filename, "pkg-1.0-cp311-cp311-manylinux2014_x86_64.whl");
+        let abi3 = score_wheel("pkg-1.0-cp37-abi3-manylinux2014_x86_64.whl", &target("cp311"), PLAT, ARCH).unwrap();
+        assert!(abi3 > score_wheel(NINJA_LINUX, &target("cp311"), PLAT, ARCH).unwrap());
     }
 
     // ── unit tests on the platform parser itself ─────────────────────────────
