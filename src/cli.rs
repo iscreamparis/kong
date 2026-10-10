@@ -58,6 +58,11 @@ pub struct RulesCmd {
     /// two folders sharing a basename never collide on one shared env.
     #[arg(short, long)]
     pub name: Option<String>,
+
+    /// Python runtime to use: "3.11", "3.11.9" or a specifier like ">=3.11".
+    /// Default: .python-version, else pyproject `requires-python`, else latest.
+    #[arg(long)]
+    pub python: Option<String>,
 }
 
 #[derive(Parser)]
@@ -146,6 +151,10 @@ pub struct SetupCmd {
     /// Skip automatic cargo build when target binary is missing
     #[arg(long)]
     pub no_build: bool,
+
+    /// Python runtime to use (see `kong rules --python`)
+    #[arg(long)]
+    pub python: Option<String>,
 }
 
 #[derive(Parser)]
