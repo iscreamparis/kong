@@ -72,18 +72,34 @@ pub fn map_arch(rust_arch: &str) -> String {
 /// npm's behaviour of treating an unknown host libc as glibc.
 #[cfg(target_os = "linux")]
 fn current_libc() -> Option<String> {
-    // A musl rootfs ships its loader as /lib/ld-musl-<arch>.so.1 and lacks the
-    // glibc loader. Detect by presence of a musl loader.
-    if let Ok(entries) = std::fs::read_dir("/lib") {
+    Some(libc_from_loaders(&["/lib", "/lib64"]).to_string())
+}
+
+/// The libc family from the dynamic loaders present in `dirs`.
+///
+/// A glibc loader (`ld-linux-*.so.*`) means glibc, even when a musl loader sits
+/// next to it: Ubuntu's `musl` package installs `/lib/ld-musl-x86_64.so.1` on a
+/// glibc system, and the old "any ld-musl => musl" probe then picked
+/// `@rolldown/binding-linux-x64-musl` for a glibc node (vite build failed with
+/// "Cannot find module '@rolldown/binding-linux-x64-gnu'"). musl only when a
+/// musl loader exists and no glibc one does (Alpine).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn libc_from_loaders(dirs: &[&str]) -> &'static str {
+    let mut musl = false;
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
         for e in entries.flatten() {
             let name = e.file_name();
             let name = name.to_string_lossy();
+            if name.starts_with("ld-linux") {
+                return "glibc";
+            }
             if name.starts_with("ld-musl-") {
-                return Some("musl".to_string());
+                musl = true;
             }
         }
     }
-    Some("glibc".to_string())
+    if musl { "musl" } else { "glibc" }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -284,5 +300,25 @@ mod tests {
         assert_eq!(map_arch("x86_64"), "x64");
         assert_eq!(map_arch("aarch64"), "arm64");
         assert_eq!(map_arch("x86"), "ia32");
+    }
+
+    #[test]
+    fn glibc_loader_wins_over_an_installed_musl_loader() {
+        let t = tempfile::TempDir::new().unwrap();
+        let lib = t.path().join("lib");
+        let lib64 = t.path().join("lib64");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::create_dir_all(&lib64).unwrap();
+        let dirs = [lib.to_str().unwrap(), lib64.to_str().unwrap()];
+        // Ubuntu/WSL with the `musl` package: both loaders present -> glibc.
+        std::fs::write(lib.join("ld-musl-x86_64.so.1"), "").unwrap();
+        std::fs::write(lib64.join("ld-linux-x86-64.so.2"), "").unwrap();
+        assert_eq!(libc_from_loaders(&dirs), "glibc");
+        // Alpine: only the musl loader -> musl.
+        std::fs::remove_file(lib64.join("ld-linux-x86-64.so.2")).unwrap();
+        assert_eq!(libc_from_loaders(&dirs), "musl");
+        // Nothing found -> glibc (npm's default).
+        std::fs::remove_file(lib.join("ld-musl-x86_64.so.1")).unwrap();
+        assert_eq!(libc_from_loaders(&dirs), "glibc");
     }
 }
