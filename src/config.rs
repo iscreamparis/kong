@@ -291,6 +291,17 @@ pub fn resolve_project_name(project_dir: &Path) -> String {
 // ── Rules generation ────────────────────────────────────────────────────────
 
 pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> Result<KongRules> {
+    generate_rules_with_python(project_dir, force, name, None)
+}
+
+/// `generate_rules` with an explicit Python runtime request (`--python`), which
+/// overrides `.python-version` / `requires-python` (see `runtime_request`).
+pub fn generate_rules_with_python(
+    project_dir: &Path,
+    force: bool,
+    name: Option<String>,
+    python: Option<&str>,
+) -> Result<KongRules> {
     // The env-location key. An explicit `--name` always wins; otherwise we derive
     // a stable, path-unique slug so that two folders sharing a basename (e.g.
     // `~/CRM-master/crm-backend` vs `~/CRM-erd/crm-backend`) never collide on one
@@ -307,7 +318,9 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
     let python_deps = crate::python::parser::detect_and_parse(project_dir)?;
     let (python_runtime, python_section) = if !python_deps.is_empty() {
         info!("Found Python dependencies — ensuring runtime");
-        let runtime = crate::python::runtime::ensure_runtime(&store_root, "latest")?;
+        let request = crate::python::runtime::runtime_request(project_dir, python);
+        info!(request = ?request, "Selecting Python runtime");
+        let runtime = crate::python::runtime::ensure_runtime_for(&store_root, &request)?;
         let py_tag = short_python_tag(&runtime.version); // e.g. "cp312"
         let marker_env = crate::python::markers::MarkerEnvironment::from_interpreter(&runtime._python_exe)?;
         let python_deps = crate::python::client::applicable_dependencies(python_deps, &marker_env, &[])?;

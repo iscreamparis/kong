@@ -194,7 +194,7 @@ fn main() -> Result<()> {
         Commands::Rules(cmd) => {
             let project_dir = cmd.path.unwrap_or_else(|| std::env::current_dir().unwrap());
             info!(path = %project_dir.display(), "Generating kong.rules");
-            let rules = config::generate_rules(&project_dir, cmd.force, cmd.name)?;
+            let rules = config::generate_rules_with_python(&project_dir, cmd.force, cmd.name, cmd.python.as_deref())?;
             let rules_path = project_dir.join("kong.rules");
             config::write_rules(&rules, &rules_path)?;
             info!(path = %rules_path.display(), "kong.rules written");
@@ -317,7 +317,7 @@ fn main() -> Result<()> {
 
             // ── 2. Rules ─────────────────────────────────────────────────
             info!("[2/4] Generating kong.rules");
-            let rules = config::generate_rules(&dest, false, None)?;
+            let rules = config::generate_rules_with_python(&dest, false, None, cmd.python.as_deref())?;
             let rules_path = dest.join("kong.rules");
             config::write_rules(&rules, &rules_path)?;
             info!(path = %rules_path.display(), "kong.rules written");
