@@ -6,7 +6,9 @@
 
 ; ── Product info ─────────────────────────────────────────────────────────────
 !define PRODUCT_NAME    "KONG"
-!define PRODUCT_VERSION "0.8.5"
+!ifndef PRODUCT_VERSION
+  !define PRODUCT_VERSION "0.0.0-dev"   ; CI passes /DPRODUCT_VERSION=<v>
+!endif
 !define PRODUCT_PUBLISHER "KONG Project"
 !define EXE_NAME        "kong.exe"
 

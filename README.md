@@ -4,7 +4,7 @@
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/iscreamparis/kong/blob/main/LICENSE-MIT)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
-[![Platform: Windows + macOS + Linux](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue.svg)]()
+[![Platform: Windows + Linux](https://img.shields.io/badge/prebuilt-Windows%20%7C%20Linux-blue.svg)]()
 [![Release](https://img.shields.io/github/v/release/iscreamparis/kong?include_prereleases&label=download)](https://github.com/iscreamparis/kong/releases)
 
 ---
@@ -31,12 +31,11 @@ pnpm proved this model works for Node.js. KONG extends it to all three ecosystem
 
 Download **[Kong-windows-x64-setup.exe](https://github.com/iscreamparis/kong/releases/latest/download/Kong-windows-x64-setup.exe)** from the [Releases page](https://github.com/iscreamparis/kong/releases/latest) and run it. It drops `kong.exe` into `C:\kong\`, creates the store directory, and adds it to your system PATH.
 
+For CI or a manual install, **[Kong-windows-x64.zip](https://github.com/iscreamparis/kong/releases/latest/download/Kong-windows-x64.zip)** contains just `kong.exe`. Versioned names (`Kong-<version>-windows-x64-setup.exe`, `Kong-<version>-windows-x64.zip`) and a `.sha256` next to each asset are on every release.
+
 ### macOS
 
-Download **[Kong-macos-arm64.dmg](https://github.com/iscreamparis/kong/releases/latest/download/Kong-macos-arm64.dmg)** from the [Releases page](https://github.com/iscreamparis/kong/releases/latest). Drag `Kong.app` to Applications, then right-click → Open to bypass Gatekeeper on first launch.
-
-<details>
-<summary>Build from source</summary>
+macOS builds are **not published** (no Mac to build and sign them on). Building from source still works:
 
 ```bash
 git clone https://github.com/iscreamparis/kong
@@ -45,13 +44,11 @@ cargo build --release
 cp target/release/kong ~/.local/bin/
 ```
 
-</details>
-
 The store lives at `~/Library/Application Support/kong/`. On macOS, KONG uses symlinks instead of NTFS junctions.
 
 ### Linux
 
-Download **[Kong-linux-x64.tar.gz](https://github.com/iscreamparis/kong/releases/latest/download/Kong-linux-x64.tar.gz)** from the [Releases page](https://github.com/iscreamparis/kong/releases/latest), extract it, and put `kong` on your PATH:
+Download **[Kong-linux-x64.tar.gz](https://github.com/iscreamparis/kong/releases/latest/download/Kong-linux-x64.tar.gz)** from the [Releases page](https://github.com/iscreamparis/kong/releases/latest) (a `Kong-linux-x64.tar.gz.sha256` sits next to it), extract it, and put `kong` on your PATH:
 
 ```bash
 curl -fsSL -o Kong-linux-x64.tar.gz \
@@ -191,7 +188,8 @@ downloads + verifies     →          global store (written once)
 | `kong rules` | Scan manifests, download all deps, write `kong.rules` |
 | `kong rules --force` | Re-download everything even if already in store |
 | `kong rules --path <dir>` | Run rules on a different project directory |
-| `kong use [kong.rules]` | Create `.venv`, `node_modules`, `.cargo` via links |
+| `kong rules --python <ver>` | Pick the Python runtime (version prefix or PEP 440 specifier); default: `.python-version`, then `requires-python`, then latest |
+| `kong use [kong.rules]` | Create `.venv`, `node_modules`, `.cargo` via links; re-points a stale or dangling link, never touches a real directory |
 | `kong use --clean` | Tear down and rebuild the project environment |
 | `kong run <script>` | Run a script from `package.json` or `pyproject.toml` |
 | `kong run <script> -- <args>` | Pass extra arguments to the script |
@@ -250,7 +248,12 @@ what npm does with its default `install-links=false` — so edits to the local p
   declared it, e.g.
   `local Node dependency '@real3d/atoms' points at a directory that does not exist: declared path : ../vendor/atoms …
   declared by : package-lock.json entry "node_modules/@real3d/atoms" (link → "../vendor/atoms")`.
+- **An absolute path in `package.json` wins over the lockfile.** npm records a local dependency
+  relative to the lockfile even when `package.json` declares `file:/abs/path`; used from another
+  depth (a git worktree, a copy) the relative path points nowhere. When `package.json` gives an
+  absolute `file:`/`link:` path, `kong rules` uses it; a relative one keeps the lockfile's path.
 - `kong solidify` keeps local packages linked (a copy would freeze live source).
+
 ---
 
 ## The Store
@@ -417,7 +420,7 @@ No pip. No npm. No brew. No conda. No rustup. Just KONG.
 - [x] **Node.js bin scripts** — link CLI tools into `node_modules/.bin/` so `vite`, `tsc`, `eslint` etc. work via `kong run`
 - [x] **Architecture-aware wheel selection** — correctly pick arm64 wheels on Apple Silicon (any compatible macOS version)
 - [x] **Proper wheel selection** — full PEP 427 filename parsing; pick the wheel matching the target interpreter's CPython/ABI tag
-- [ ] **Check `requires_python`** — honor a wheel's `requires_python` metadata when selecting
+- [x] **Check `requires_python`** — honored for releases and files, direct and transitive (0.8.7)
 - [ ] **Transitive dependency cycle detection** — prevent `kong rules` from hanging on circular deps
 - [ ] **Download retry** — retry failed downloads before giving up
 
@@ -459,12 +462,16 @@ No pip. No npm. No brew. No conda. No rustup. Just KONG.
 - [x] **Single-instance GUI** — `flock()` prevents multiple GUI windows from opening simultaneously.
 - [x] **`ca-certificates` bottle fix** — platform-independent (`all`) bottles now resolved correctly.
 
-### v0.8 — Linux GA + migration hardening ← **current**
-- [x] **Linux release** — static musl binary built + attached by CI on every `vX.Y.Z` tag
+### v0.8 — Linux GA + migration hardening ← **current (0.8.7)**
+- [x] **Linux and Windows releases** — static musl Linux tarball, Windows installer and `kong.exe` zip, all built + attached by GitHub Actions on every `vX.Y.Z` tag (no macOS build is published)
 - [x] **Wheel selection by target CPython/ABI tag** — picks the exact `cpXY` / `abi3` / `none` wheel for the managed interpreter and rejects a wrong CPython minor (e.g. won't pick a `cp313t` wheel for a `cp310` runtime)
 - [x] **`kong import` copy-adopts installed packages** — copies the existing `.venv` / `node_modules` into the store byte-for-byte (native extensions included), with no re-download or re-resolve
 - [x] **Robust import copy** — handles venv internals such as directory symlinks (`lib64 -> lib`) and dangling links
 - [x] **Directory-mode normalisation on extraction** (0.8.5) — `tar.gz` extraction now creates directories with a traversable mode (`0o755`) instead of preserving the tarball's recorded mode. Some npm tarballs ship directory entries as `0o666` (no execute/traverse bit — e.g. `pngjs` 5.0.0), which made the store dir non-traversable and caused a later `hard_link` into it to fail with `Permission denied (EACCES)`. npm / pnpm / yarn normalise dir modes for the same reason; kong now does too. File modes (executable bits) are preserved.
+
+- [x] **Python markers, extras, `Requires-Python`** (0.8.7) — PEP 508 markers evaluated against the managed interpreter, requested extras installed, incompatible releases skipped; runtime picked from `--python` / `.python-version` / `requires-python`; `py3-none-<platform>` wheels accepted
+- [x] **Nested npm installs** (0.8.7) — a second version npm keeps under another package is placed at its lockfile path; the top-level version is always the lockfile's
+- [x] **Stale links and local deps** (0.8.7) — `kong use` re-points dangling `node_modules` / `.venv` links instead of failing with `os error 17`; an absolute `file:`/`link:` path in `package.json` wins over the lockfile's relative one; glibc beats an extra musl loader
 
 ### v0.9 — Performance + broader compatibility
 - [ ] **Parallel downloads** — all packages fetched concurrently (currently sequential)
@@ -491,7 +498,7 @@ No pip. No npm. No brew. No conda. No rustup. Just KONG.
 
 ### v1.0 — Production
 - [x] **macOS support** — symlinks, platform-specific selection, GHCR bottles
-- [x] **Linux support** — CLI-only build (Slint GUI gated behind an optional `gui` Cargo feature so no fontconfig/X11/OpenGL needed), XDG store path (`~/.local/share/kong`), symlinks + hard links, manylinux wheel selection, linux Node/Rust/Python runtime downloads, exec-bit `.bin/` shims; `Brewfile` warns-and-skips (apt manages system deps). Smoke-tested end-to-end on Ubuntu/WSL against real Python + Node manifests. **Prebuilt Linux release** — a static musl binary (`Kong-<version>-linux-x64.tar.gz`) is built + attached by CI (`.github/workflows/release-linux.yml`) on every `vX.Y.Z` tag, alongside the Windows installer and macOS DMG.
+- [x] **Linux support** — CLI-only build (Slint GUI gated behind an optional `gui` Cargo feature so no fontconfig/X11/OpenGL needed), XDG store path (`~/.local/share/kong`), symlinks + hard links, manylinux wheel selection, linux Node/Rust/Python runtime downloads, exec-bit `.bin/` shims; `Brewfile` warns-and-skips (apt manages system deps). Smoke-tested end-to-end on Ubuntu/WSL against real Python + Node manifests. **Prebuilt releases** — `.github/workflows/release.yml` builds on every `vX.Y.Z` tag a static musl Linux binary (`Kong-<version>-linux-x64.tar.gz`), the Windows installer (`Kong-<version>-windows-x64-setup.exe`) and a `kong.exe` zip (`Kong-<version>-windows-x64.zip`); macOS is not published.
 - [ ] Private registry support (PyPI, npm, crates.io)
 - [ ] Windows installer with proper PATH management (NSIS → WiX)
 - [ ] `kong doctor` full report with auto-fix suggestions
@@ -501,9 +508,9 @@ No pip. No npm. No brew. No conda. No rustup. Just KONG.
 ## Design Principles
 
 - **No external package managers.** KONG never calls `pip`, `npm`, `yarn`, `pnpm`, `cargo install`, or `brew` as subprocesses. All registry communication is in-house via `reqwest`.
-- **Idempotent.** Every command is safe to re-run. Already in store? Skip the download. Link already exists? Skip the link.
+- **Idempotent.** Every command is safe to re-run. Already in store? Skip the download. Link already correct? Keep it; stale or dangling? Re-point it.
 - **Transparent.** Your project directory looks exactly like a normal project to every tool. KONG is invisible at runtime.
-- **Cross-platform.** Windows (NTFS junctions + hard links), macOS, and Linux (symlinks + hard links). The native GUI is desktop-only; Linux ships as a CLI-only build.
+- **Cross-platform.** Windows (NTFS junctions + hard links), macOS, and Linux (symlinks + hard links). The native GUI is desktop-only; Linux ships as a CLI-only build. Prebuilt releases: Linux and Windows.
 
 ---
 
@@ -513,15 +520,17 @@ KONG is early-stage software. Here's what doesn't work yet — no surprises.
 
 ### Python
 - **Target markers and extras:** requirements.txt / PEP 621 dependencies and transitive `Requires-Dist` markers are evaluated against the managed interpreter, not a Python on PATH. Boolean expressions, version comparisons and requested extras are honored, including extras discovered after the base package was expanded. Invalid markers fail with the requirement name. Downloads use the selected release's metadata. This does not add SAT/backtracking resolution or platform selection for universal lockfile graphs.
-- **No sdist compilation.** KONG downloads pre-built wheels only. If a package has no wheel for your platform (rare for popular packages, common for niche ones), it will download the source tarball but won't compile C extensions. Packages like `numpy`, `flask`, `requests` ship wheels and work fine.
+- **No sdist compilation.** KONG downloads pre-built wheels only. If a package has no wheel for your platform (rare for popular packages, common for niche ones), it will download the source tarball but won't compile C extensions. Packages like `numpy`, `flask`, `requests` ship wheels and work fine. Release selection prefers the newest version that publishes a compatible wheel; `py3-none-<platform>` wheels are accepted for a matching host.
+- **Python runtime selection.** The interpreter comes from `--python`, else `.python-version`, else `requires-python` in `pyproject.toml` (newest available runtime that satisfies it), else the latest.
 - **Requires-Python:** PyPI JSON release/file constraints are checked against the full managed interpreter version, including exact pins, transitives, sdist fallback and warm-store reuse. Incompatible releases are skipped; impossible bounds fail instead of falling back to global latest. Kong currently uses the PyPI JSON API, not the PEP 503 HTML simple index.
-- **Version ranges not resolved.** `>=1.0` or `~=2.3` in `requirements.txt` are skipped — only exact pins (`==`) and lockfile versions are handled. Use a lockfile for reliable results.
+- **Version ranges without a lockfile.** Exact pins (`==`) and lockfile versions are the reliable path; ranges are resolved to the newest compatible release (wheel-aware, `Requires-Python`-aware) but there is no SAT/backtracking resolver, so conflicting ranges are not reconciled. Use a lockfile for reproducible results.
 
 ### Node.js
 - ~~**Bin scripts not linked.**~~ Fixed — `node_modules/.bin/` is now populated with symlinks (macOS/Linux) or `.cmd` wrappers (Windows) for all packages declaring `"bin"` in their `package.json`.
 - **No peer/optional dependency handling.** Peer deps are not resolved or validated.
 - **pnpm-lock.yaml not fully supported.** Declared in docs but the parser is incomplete — `package-lock.json` is the reliable path. (Local `link:`/`file:` entries of a pnpm lockfile are therefore not handled either.)
 - **Nested registry installs (`package-lock.json` v1/v2/v3).** A second version npm keeps under another package (`node_modules/path-scurry/node_modules/lru-cache`) is recorded in `kong.rules` with its lockfile `path` and placed at that path by `kong use`; the hoisted `node_modules/<name>` is always the lockfile's top-level version, and a wrong top-level left by an older KONG is relinked. Not covered: a nested install without a lockfile (`package.json` only), pnpm virtual-store keys and workspace-member nested installs (still flat, by name).
+- **Stale links.** A `node_modules` / `.venv` link left by another machine (committed to the repo, dangling here) is re-pointed by `kong use`; a real directory at that path is never replaced.
 - **Local packages: directories only, top level only.** `file:`/`link:` directories are linked (see *Local Node packages*). A local **tarball** (`file:../x-1.0.0.tgz`) fails with a clear error; a local link nested under another package (`node_modules/a/node_modules/b` → dir) is skipped with a warning (local links are only placed at the top level). The local package's own dependencies are never installed by KONG — same as npm.
 
 ### Rust
