@@ -285,6 +285,7 @@ fn adopt_python(project_dir: &Path, store_root: &Path) -> Result<Option<(PythonS
             hash: None,
             store_path: store_path_rel,
             source_url: None,
+            path: None,
         });
     }
 
@@ -438,6 +439,7 @@ fn adopt_single_node_package(
         hash: None,
         store_path: store_path_rel,
         source_url: None,
+        path: None,
     }))
 }
 
