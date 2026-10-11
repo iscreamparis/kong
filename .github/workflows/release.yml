@@ -1,0 +1,194 @@
+name: Release
+
+# Builds KONG for Linux (static musl, CLI) and Windows (installer + zip) and, on a
+# `v*` tag, publishes them as one GitHub Release. workflow_dispatch builds the
+# artifacts only (no release). No macOS build is published.
+
+on:
+  push:
+    tags:
+      - 'v*'
+    # Dry run of the builds from a release branch (artifacts only, never a release).
+    branches:
+      - 'release/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: Linux static binary (musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable) with musl target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-musl-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build (headless, static musl, no GUI)
+        run: cargo build --release --no-default-features --target x86_64-unknown-linux-musl
+
+      - name: Verify the binary is statically linked
+        run: |
+          BIN=target/x86_64-unknown-linux-musl/release/kong
+          file "$BIN"
+          file "$BIN" | grep -q 'static' || { echo "ERROR: binary is not static"; exit 1; }
+          "$BIN" --version
+
+      - name: Derive version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Package tarball (Kong-<version>-linux-x64.tar.gz)
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          BIN=target/x86_64-unknown-linux-musl/release/kong
+          strip "$BIN" || true
+          STAGE="$(mktemp -d)"
+          cp "$BIN" "$STAGE/kong"
+          chmod +x "$STAGE/kong"
+          cp README.md LICENSE-MIT LICENSE-APACHE "$STAGE/" 2>/dev/null || true
+          ASSET="Kong-${VERSION}-linux-x64.tar.gz"
+          tar -C "$STAGE" -czf "$ASSET" .
+          sha256sum "$ASSET" | tee "$ASSET.sha256"
+          mkdir -p dist
+          mv "$ASSET" "$ASSET.sha256" dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+
+  windows:
+    name: Windows installer + zip
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.toml') }}
+
+      - name: Build (GUI, default features; installer built in the next steps)
+        shell: bash
+        env:
+          KONG_SKIP_NSIS: '1'
+        run: cargo build --release
+
+      - name: Derive version from Cargo.toml
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          ./target/release/kong.exe --version
+
+      - name: Ensure NSIS
+        shell: pwsh
+        run: |
+          $paths = @("C:\Program Files (x86)\NSIS\makensis.exe", "C:\Program Files\NSIS\makensis.exe")
+          if (-not ($paths | Where-Object { Test-Path $_ })) { choco install nsis -y --no-progress }
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          $mk = @("C:\Program Files (x86)\NSIS\makensis.exe", "C:\Program Files\NSIS\makensis.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+          # The .nsi resolves "..\target\release\kong.exe" relative to build/ (as build.rs runs it).
+          Push-Location build
+          & $mk "/DPRODUCT_VERSION=$v" kong-installer.nsi
+          $code = $LASTEXITCODE
+          Pop-Location
+          if ($code -ne 0) { throw "makensis failed" }
+
+      - name: Package and checksum
+        shell: pwsh
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Move-Item "build/Kong-$v-windows-x64-setup.exe" dist/
+          $stage = New-Item -ItemType Directory -Force "stage"
+          Copy-Item target/release/kong.exe stage/
+          Copy-Item LICENSE-MIT, LICENSE-APACHE, README.md stage/
+          Compress-Archive -Path stage/* -DestinationPath "dist/Kong-$v-windows-x64.zip"
+          foreach ($f in Get-ChildItem dist -File) {
+            $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
+            # LF, no BOM: `sha256sum -c` reads it as is (Out-File would end the line in CRLF)
+            [System.IO.File]::WriteAllText("$($f.FullName).sha256", "$h  $($f.Name)`n")
+          }
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+
+  release:
+    name: Publish GitHub Release
+    needs: [linux, windows]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Version-less copies and release notes
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          cd artifacts
+          cp "Kong-$V-linux-x64.tar.gz" Kong-linux-x64.tar.gz
+          cp "Kong-$V-linux-x64.tar.gz.sha256" Kong-linux-x64.tar.gz.sha256
+          sed -i "s/Kong-$V-linux-x64.tar.gz/Kong-linux-x64.tar.gz/" Kong-linux-x64.tar.gz.sha256
+          cp "Kong-$V-windows-x64-setup.exe" Kong-windows-x64-setup.exe
+          cp "Kong-$V-windows-x64-setup.exe.sha256" Kong-windows-x64-setup.exe.sha256
+          sed -i "s/Kong-$V-windows-x64-setup.exe/Kong-windows-x64-setup.exe/" Kong-windows-x64-setup.exe.sha256
+          cp "Kong-$V-windows-x64.zip" Kong-windows-x64.zip
+          cp "Kong-$V-windows-x64.zip.sha256" Kong-windows-x64.zip.sha256
+          sed -i "s/Kong-$V-windows-x64.zip/Kong-windows-x64.zip/" Kong-windows-x64.zip.sha256
+          cd ..
+          python3 - "$V" <<'PY'
+          import re, sys
+          v = sys.argv[1]
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          m = re.search(r"^## \[" + re.escape(v) + r"\][^\n]*\n(.*?)(?=^## \[|\Z)", text, re.S | re.M)
+          if not m:
+              sys.exit("no CHANGELOG section for " + v)
+          open("release-notes.md", "w", encoding="utf-8").write(m.group(1).strip() + "\n")
+          PY
+          ls -la artifacts; cat release-notes.md | head -20
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: KONG ${{ github.ref_name }}
+          body_path: release-notes.md
+          make_latest: true
+          files: artifacts/*

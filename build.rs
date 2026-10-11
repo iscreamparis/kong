@@ -26,6 +26,14 @@ fn main() {
         return;
     }
 
+    // Opt-out: KONG_SKIP_NSIS=1 skips the installer (CI builds it in a separate
+    // step with /DPRODUCT_VERSION; also handy for local dev).
+    println!("cargo:rerun-if-env-changed=KONG_SKIP_NSIS");
+    if std::env::var("KONG_SKIP_NSIS").map(|v| !v.is_empty() && v != "0").unwrap_or(false) {
+        println!("cargo:warning=KONG_SKIP_NSIS set — skipping installer build");
+        return;
+    }
+
     let nsis = r"C:\Program Files (x86)\NSIS\makensis.exe";
     if !std::path::Path::new(nsis).exists() {
         println!("cargo:warning=NSIS not found at {nsis} — skipping installer build");

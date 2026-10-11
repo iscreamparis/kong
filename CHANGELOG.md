@@ -7,7 +7,39 @@ and KONG adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.7] — 2026-10-12
+
 ### Fixed
+- **Python environment markers and extras (PR #9).** PEP 508 markers in `requirements.txt`, PEP 621
+  dependencies and transitive `Requires-Dist` are evaluated against the managed interpreter (queried once,
+  not a Python on `PATH`): platform/interpreter/version variables, `and`/`or`/parentheses, version
+  comparisons, membership. Requested extras are honoured, also when discovered after the base package was
+  expanded. Dependencies are read from the selected release's metadata (`/<name>/<version>/json`), not the
+  latest release's. Invalid markers fail with the requirement name. A Windows-only `pywin32` no longer
+  lands in a Linux environment.
+- **`Requires-Python` is honoured (PR #10).** Per-release and per-file constraints are checked against the
+  full managed interpreter version for direct and transitive dependencies, exact pins, wheel/sdist choice,
+  cold downloads and warm-store reuse; incompatible releases are skipped, impossible bounds fail instead of
+  falling back to the global latest. Wheel METADATA is validated before a download is marked verified.
+- **`py3-none-<platform>` wheels** (ML wheels tagged by platform only) are accepted for a matching host.
+- **Nested npm installs keep their lockfile path (PR #11).** `node_modules/a/node_modules/b` was flattened
+  to `b`, and whichever entry came first took the top-level slot (`lru-cache` 11.5.2 over 5.1.1, `semver`,
+  `esbuild`, `source-map`, `magic-string`). `kong.rules` entries now carry an optional `path` (omitted for
+  top-level packages, so unchanged projects keep a byte-identical `kong.rules`); `kong use` places top-level
+  entries first, then nested ones at their path, and relinks a wrong top-level version left by an older KONG.
+  A package whose version changed after `kong rules` re-resolved is relinked rather than skipped.
+  Not covered: nested installs without a lockfile, pnpm virtual-store keys, workspace-member nested installs.
+- **`kong use` re-points stale or dangling links instead of failing with `os error 17`.** A repo that commits
+  its `node_modules` / `.venv` links (pointing into another machine's RULEZ) checks them out dangling;
+  `Path::exists` follows the link, so KONG saw "absent" and `symlink()` failed with *File exists*. The link
+  entry itself is now detected (lstat / junction), a correct one is kept, a stale or dangling one is
+  re-pointed (never its target), and a real directory is never touched.
+- **An absolute `file:` / `link:` path in `package.json` wins over the lockfile's relative one.** npm records
+  a local dependency relative to the lockfile; used from another depth (a git worktree, a copy) that path
+  points nowhere and `kong rules` aborted with "points at a directory that does not exist".
+- **glibc wins over an extra musl loader.** Ubuntu's `musl` package installs `/lib/ld-musl-x86_64.so.1` on a
+  glibc system; libc detection returned musl and picked e.g. `@rolldown/binding-linux-x64-musl` for a glibc
+  Node. A glibc loader (`ld-linux-*` in `/lib` or `/lib64`) now means glibc; musl only when no glibc loader exists.
 - **Local `file:` / `link:` Node dependencies no longer abort `kong rules`.** A project
   depending on `"@real3d/atoms": "file:../vendor/atoms"` failed with
   `Error: package '../../CRM_Atoms@0.1.0' not found on npm`. `parse_package_lock` kept every
@@ -23,20 +55,6 @@ and KONG adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Every DefinitelyTyped `@types/*` tarball has this shape (`qrcode/`, `node/`, `estree/`…): on a
   copy of the CRM frontend, a fresh `kong use` with 0.8.5 failed `npm run build` with
   `TS7016: Could not find a declaration file for module 'qrcode'`; it now builds.
-
-### Added
-- **Local Node packages are first-class.** `link: true` lockfile entries, `resolved: "file:<dir>"`
-  entries, v1 `"version": "file:<dir>"` and `file:`/`link:` specs in `package.json` become local
-  deps: recorded in `kong.rules` → `node.local` (path relative to the project, as declared) and
-  linked by `kong use` as a junction/symlink `node_modules/<name>` → the directory, like npm —
-  never downloaded, never copied into the store. `node.local` is omitted when empty (unchanged
-  `kong.rules` for every other project; older kong versions ignore the field). A missing target
-  errors with the dependency, declared path, resolved path and the declaring lockfile entry; a
-  local tarball errors clearly instead of hitting the registry.
-
-## [0.8.6] — 2026-07-09
-
-### Fixed
 - **Never select a version KONG cannot install (artifact-aware resolution).**
   `resolve_best_version` chose the highest version satisfying the PEP 440
   specifier without checking whether that release ships an installable artifact;
@@ -58,6 +76,27 @@ and KONG adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `list_versions` became `list_releases` (the PyPI JSON already carried the per-version
   file lists; they were being discarded), and `resolve_best_version` takes the target
   Python tag. New pure helper `installable_versions()` is host-independent and unit-tested.
+
+### Added
+- **Python runtime chosen from the project** (`kong rules` / `kong setup`): `--python <version-or-specifier>`,
+  else `.python-version`, else `[project] requires-python` in `pyproject.toml` (newest available runtime
+  satisfying it), else the latest as before. Version prefixes match on component boundaries (`3.1` ≠ `3.10`).
+- **Local Node packages are first-class.** `link: true` lockfile entries, `resolved: "file:<dir>"`
+  entries, v1 `"version": "file:<dir>"` and `file:`/`link:` specs in `package.json` become local
+  deps: recorded in `kong.rules` → `node.local` (path relative to the project, as declared) and
+  linked by `kong use` as a junction/symlink `node_modules/<name>` → the directory, like npm —
+  never downloaded, never copied into the store. `node.local` is omitted when empty (unchanged
+  `kong.rules` for every other project; older kong versions ignore the field). A missing target
+  errors with the dependency, declared path, resolved path and the declaring lockfile entry; a
+  local tarball errors clearly instead of hitting the registry.
+
+### Changed
+- **Releases are built by GitHub Actions for Linux and Windows only** (`.github/workflows/release.yml`,
+  replacing `release-linux.yml`): a static musl Linux tarball, the Windows NSIS installer and a bare
+  `kong.exe` zip, each with a `.sha256`, plus version-less copies for `releases/latest/download` links.
+  No macOS DMG is published any more; building from source still works on macOS.
+- `build.rs`: `KONG_SKIP_NSIS=1` skips the NSIS step. `build/kong-installer.nsi` takes
+  `/DPRODUCT_VERSION=<v>` instead of a hard-coded version.
 
 ## [0.8.5] — 2026-07-06
 
