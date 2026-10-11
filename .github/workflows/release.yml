@@ -137,7 +137,8 @@ jobs:
           Compress-Archive -Path stage/* -DestinationPath "dist/Kong-$v-windows-x64.zip"
           foreach ($f in Get-ChildItem dist -File) {
             $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
-            "$h  $($f.Name)" | Out-File -Encoding ascii "$($f.FullName).sha256"
+            # LF, no BOM: `sha256sum -c` reads it as is (Out-File would end the line in CRLF)
+            [System.IO.File]::WriteAllText("$($f.FullName).sha256", "$h  $($f.Name)`n")
           }
           Get-ChildItem dist | Format-Table Name, Length
 
