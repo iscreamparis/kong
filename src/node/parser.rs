@@ -26,6 +26,10 @@ pub struct NodeDep {
     /// copied into the store — `kong use` links `node_modules/<name>` straight
     /// at the directory, like npm does. `None` for every registry package.
     pub local: Option<LocalSource>,
+    /// Lockfile key of a NESTED install (`node_modules/a/node_modules/b`): where
+    /// npm puts a second version of `b` that only `a` sees. `None` for a
+    /// top-level (hoisted) entry and for every non-lockfile source.
+    pub path: Option<String>,
 }
 
 /// Where a local (non-registry) Node package lives, as declared by the project.
@@ -229,6 +233,7 @@ pub fn parse_package_lock(path: &Path) -> Result<Vec<NodeDep>> {
                     let version = value.get("version").and_then(|v| v.as_str())
                         .unwrap_or("0.0.0").to_string();
                     deps.push(NodeDep {
+                        path: None,
                         name,
                         version,
                         _resolved: Some(res.to_string()),
@@ -281,6 +286,7 @@ pub fn parse_package_lock(path: &Path) -> Result<Vec<NodeDep>> {
 
             if !version.is_empty() {
                 deps.push(NodeDep {
+                    path: nested_install_path(key),
                     name,
                     version,
                     _resolved: resolved,
@@ -306,7 +312,22 @@ pub fn parse_package_lock(path: &Path) -> Result<Vec<NodeDep>> {
 }
 
 fn parse_v1_deps(deps_map: &serde_json::Map<String, serde_json::Value>, out: &mut Vec<NodeDep>) {
+    parse_v1_level(deps_map, None, out);
+}
+
+/// One level of a v1 `dependencies` tree. `parent` is the lockfile-style key of
+/// the package whose `dependencies` this is (`None` at the top level), so a
+/// nested entry records `node_modules/<parent>/node_modules/<name>`.
+fn parse_v1_level(
+    deps_map: &serde_json::Map<String, serde_json::Value>,
+    parent: Option<&str>,
+    out: &mut Vec<NodeDep>,
+) {
     for (name, value) in deps_map {
+        let key = match parent {
+            Some(p) => format!("{p}/node_modules/{name}"),
+            None => format!("node_modules/{name}"),
+        };
         let version = value
             .get("version")
             .and_then(|v| v.as_str())
@@ -318,6 +339,7 @@ fn parse_v1_deps(deps_map: &serde_json::Map<String, serde_json::Value>, out: &mu
         if let Some(p) = version.strip_prefix("file:").or_else(|| version.strip_prefix("link:")) {
             if !is_tarball_path(p) {
                 out.push(NodeDep {
+                    path: None,
                     name: name.clone(),
                     version: "0.0.0".into(),
                     _resolved: None,
@@ -347,6 +369,7 @@ fn parse_v1_deps(deps_map: &serde_json::Map<String, serde_json::Value>, out: &mu
 
         if !version.is_empty() {
             out.push(NodeDep {
+                path: if parent.is_some() { Some(key.clone()) } else { None },
                 name: name.clone(),
                 version,
                 _resolved: resolved,
@@ -364,7 +387,7 @@ fn parse_v1_deps(deps_map: &serde_json::Map<String, serde_json::Value>, out: &mu
 
         // Recurse into nested dependencies
         if let Some(nested) = value.get("dependencies").and_then(|d| d.as_object()) {
-            parse_v1_deps(nested, out);
+            parse_v1_level(nested, Some(&key), out);
         }
     }
 }
@@ -399,6 +422,7 @@ pub fn parse_package_json(path: &Path) -> Result<Vec<NodeDep>> {
                         );
                     }
                     deps.push(NodeDep {
+                        path: None,
                         name: name.clone(),
                         version: "0.0.0".into(),
                         _resolved: None,
@@ -423,6 +447,7 @@ pub fn parse_package_json(path: &Path) -> Result<Vec<NodeDep>> {
 
                 if !cleaned.is_empty() {
                     deps.push(NodeDep {
+                        path: None,
                         // package.json's dependency map carries no os/cpu/libc —
                         // those live in each dependency's own package.json, which
                         // we don't fetch here. Platform filtering therefore only
@@ -443,6 +468,25 @@ pub fn parse_package_json(path: &Path) -> Result<Vec<NodeDep>> {
     }
 
     Ok(deps)
+}
+
+/// Install location of a NESTED lockfile entry, or `None` for a top-level one.
+///
+/// `node_modules/path-scurry/node_modules/lru-cache` is a second version of
+/// `lru-cache` that only `path-scurry` resolves; npm keeps it there and the
+/// hoisted `node_modules/lru-cache` is a different version. Only keys that
+/// start with `node_modules/` and contain a further `/node_modules/` count.
+/// pnpm virtual-store keys (`node_modules/.pnpm/…`) and workspace-member keys
+/// keep the historical flat behaviour.
+fn nested_install_path(key: &str) -> Option<String> {
+    if !key.starts_with("node_modules/") || key.contains("/.pnpm/") {
+        return None;
+    }
+    if key["node_modules/".len()..].contains("/node_modules/") {
+        Some(key.to_string())
+    } else {
+        None
+    }
 }
 
 /// Package name from a lockfile key: the text after the LAST `node_modules/`.
@@ -501,6 +545,7 @@ fn local_dep_from_link(
         .unwrap_or("0.0.0")
         .to_string();
     Some(NodeDep {
+        path: None,
         name: leaf_name(key),
         version,
         _resolved: Some(resolved.to_string()),
@@ -735,6 +780,7 @@ mod tests {
 
     fn dep(name: &str, os: &[&str], cpu: &[&str], libc: &[&str], optional: bool) -> NodeDep {
         NodeDep {
+            path: None,
             name: name.into(),
             version: "1.0.0".into(),
             _resolved: None,
@@ -822,5 +868,44 @@ mod tests {
         // …and on a linux host the parser-level filter drops it.
         let kept = filter_for_host(deps, &linux_x64_glibc()).unwrap();
         assert!(kept.is_empty());
+    }
+
+    #[test]
+    fn nested_installs_keep_their_lockfile_path() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), include_str!("fixtures/nested-installs.package-lock.json")).unwrap();
+        let deps = parse_package_lock(tmp.path()).unwrap();
+        assert_eq!(deps.len(), 5);
+        let find = |v: &str| deps.iter().find(|d| d.name == "lru-cache" && d.version == v).unwrap();
+        assert_eq!(find("5.1.1").path, None, "top-level entry has no path");
+        assert_eq!(
+            find("11.5.2").path.as_deref(),
+            Some("node_modules/path-scurry/node_modules/lru-cache")
+        );
+        let inner = deps.iter().find(|d| d.name == "@scope/inner").unwrap();
+        assert_eq!(inner.path.as_deref(), Some("node_modules/@scope/outer/node_modules/@scope/inner"));
+        assert!(deps.iter().find(|d| d.name == "path-scurry").unwrap().path.is_none());
+    }
+
+    #[test]
+    fn pnpm_virtual_store_keys_are_not_nested_installs() {
+        assert_eq!(nested_install_path("node_modules/.pnpm/express@4.18.2/node_modules/express"), None);
+        assert_eq!(nested_install_path("node_modules/express"), None);
+        assert_eq!(nested_install_path("packages/lib/node_modules/x"), None);
+    }
+
+    #[test]
+    fn v1_nested_dependencies_record_their_path() {
+        let json = r#"{"lockfileVersion":1,"dependencies":{
+            "a":{"version":"1.0.0","dependencies":{"b":{"version":"2.0.0","dependencies":{"c":{"version":"3.0.0"}}}}},
+            "b":{"version":"1.5.0"}}}"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), json).unwrap();
+        let deps = parse_package_lock(tmp.path()).unwrap();
+        let p = |n: &str, v: &str| deps.iter().find(|d| d.name == n && d.version == v).unwrap().path.clone();
+        assert_eq!(p("a", "1.0.0"), None);
+        assert_eq!(p("b", "1.5.0"), None);
+        assert_eq!(p("b", "2.0.0").as_deref(), Some("node_modules/a/node_modules/b"));
+        assert_eq!(p("c", "3.0.0").as_deref(), Some("node_modules/a/node_modules/b/node_modules/c"));
     }
 }

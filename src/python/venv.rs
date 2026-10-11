@@ -492,6 +492,7 @@ mod tests {
                     hash: None,
                     store_path: pkg_rel.into(),
                     source_url: None,
+                    path: None,
                 }],
             }),
             node: None,

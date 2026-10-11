@@ -586,6 +586,7 @@ fn populate_packages(window: &KongWindow, project_name: &str) {
                 hash: b.hash.clone(),
                 store_path: b.store_path.clone(),
                 source_url: b.source_url.clone(),
+                path: None,
             }
         }).collect();
         add_deps("brew", &brew_as_pkg);

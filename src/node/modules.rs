@@ -1,14 +1,18 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use tracing::{debug, info};
 
-use crate::config::{LocalPackageEntry, NodeSection};
+use crate::config::{LocalPackageEntry, NodeSection, PackageEntry};
 use crate::link;
 
-/// Build a flat node_modules structure from the store using deep hard links.
+/// Build node_modules from the store using deep hard links.
 ///
-/// All packages land directly at `node_modules/<name>` (hoisted, like npm).
+/// Top-level packages land at `node_modules/<name>` (hoisted, like npm); a
+/// package with a `path` (a nested lockfile install such as
+/// `node_modules/path-scurry/node_modules/lru-cache`) lands at that path, so it
+/// keeps its own version next to the hoisted one.
 /// We use deep hard links rather than directory junctions so that Node's
 /// module resolution sees project-local paths for every file's `__dirname`.
 /// Junctions on Windows are transparent to path resolution, so a junction
@@ -31,38 +35,73 @@ pub fn build_node_modules(
 
     link_local_packages(&nm, project_dir, &node.local)?;
 
-    for pkg in &node.packages {
+    // Top-level entries FIRST (no `path`), whatever the order of the list: the
+    // hoisted `node_modules/<name>` must be the lockfile's own top-level version,
+    // never a nested one that happens to be listed earlier. Then the nested
+    // installs, shallowest first so a parent exists before its own nested dir.
+    let top: Vec<&PackageEntry> = node.packages.iter().filter(|p| p.path.is_none()).collect();
+    let mut nested: Vec<&PackageEntry> = node.packages.iter().filter(|p| p.path.is_some()).collect();
+    nested.sort_by_key(|p| p.path.as_deref().map_or(0, |s| s.matches("node_modules/").count()));
+
+    let mut placed: HashSet<std::path::PathBuf> = HashSet::new();
+    for pkg in top.into_iter().chain(nested) {
         let src = store_root.join(&pkg.store_path);
         if !src.exists() {
             tracing::warn!(pkg = %pkg.name, "Store path missing, skipping: {}", src.display());
             continue;
         }
-
         let content_dir = package_content_root(&src);
 
-        // Destination: node_modules/<name> (handle @scope/name)
-        let top_level = nm.join(&pkg.name);
-        // Was a LOCAL package on a previous `kong use` (now a registry one):
-        // drop the link itself — never what it points at.
-        if is_dir_link(&top_level) {
-            remove_dir_link(&top_level)?;
-        }
-        if top_level.exists() {
+        let dest = match pkg.path.as_deref() {
+            // Nested: <env>/node_modules/a/node_modules/b, exactly the lockfile key.
+            Some(p) => {
+                let rel = safe_rel_path(p).with_context(|| {
+                    format!("invalid nested install path '{}' for {}", p, pkg.name)
+                })?;
+                let dest = env_dir.join(rel);
+                // The parent package must be installed (it may have been skipped,
+                // e.g. a platform-incompatible optional): never create a bare dir.
+                let parent_key = &p[..p.rfind("/node_modules/").unwrap_or(0)];
+                if !env_dir.join(parent_key).join("package.json").is_file() {
+                    debug!(pkg = %pkg.name, path = %p, "Parent package not installed, skipping nested");
+                    continue;
+                }
+                dest
+            }
+            None => nm.join(&pkg.name),
+        };
+        // Two entries for one location (old kong.rules with duplicate top-level
+        // names): the first wins, as before — never flip-flop between them.
+        if !placed.insert(dest.clone()) {
             debug!(pkg = %pkg.name, "Already linked, skipping");
             continue;
         }
-
-        // Create @scope/ parent if needed
-        if pkg.name.contains('/') {
-            if let Some(parent) = top_level.parent() {
-                std::fs::create_dir_all(parent)?;
+        // Was a LOCAL package on a previous `kong use` (now a registry one):
+        // drop the link itself — never what it points at.
+        if is_dir_link(&dest) {
+            remove_dir_link(&dest)?;
+        }
+        if dest.exists() {
+            // Unreadable package.json: leave it alone (old behaviour).
+            let wrong = installed_version(&dest).map_or(false, |v| v != pkg.version);
+            if !wrong {
+                debug!(pkg = %pkg.name, "Already linked, skipping");
+                continue;
             }
+            // Wrong version left by an older kong (nested version hoisted over
+            // the top-level one). It is the env's own tree (hard links), so
+            // removing it cannot touch the store.
+            info!(pkg = %pkg.name, want = %pkg.version, at = %dest.display(), "Replacing stale install");
+            link::remove_dir_all_robust(&dest)
+                .with_context(|| format!("failed to replace stale {}", dest.display()))?;
         }
 
-        link::link_package(&content_dir, &top_level)
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        link::link_package(&content_dir, &dest)
             .with_context(|| format!("failed to link node package {}", pkg.name))?;
-
-        debug!(pkg = %pkg.name, "Linked into node_modules");
+        debug!(pkg = %pkg.name, at = %dest.display(), "Linked into node_modules");
     }
 
     info!("node_modules ready at {}", nm.display());
@@ -144,6 +183,28 @@ pub fn build_node_modules(
     }
 
     Ok(())
+}
+
+/// `version` field of `<dir>/package.json`, if readable.
+fn installed_version(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("package.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("version")?.as_str().map(|s| s.to_string())
+}
+
+/// A lockfile key as a relative path that cannot escape the env.
+fn safe_rel_path(p: &str) -> Result<std::path::PathBuf> {
+    let mut out = std::path::PathBuf::new();
+    for seg in p.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." || seg.contains('\\') || seg.contains(':') {
+            bail!("unsafe segment '{seg}'");
+        }
+        out.push(seg);
+    }
+    if !p.starts_with("node_modules/") {
+        bail!("must start with node_modules/");
+    }
+    Ok(out)
 }
 
 /// The directory holding a stored npm package's `package.json`.
@@ -395,5 +456,116 @@ mod tests {
         assert!(!env.join("node_modules").exists());
         assert!(vendor.join("marker.txt").exists(), "local package source must survive a clean");
         assert!(vendor.join("package.json").exists());
+    }
+
+    // ── nested installs ────────────────────────────────────────────────────
+
+    use crate::config::PackageEntry;
+
+    /// Put a fake npm package (conventional `package/` layout) in the store.
+    fn store_pkg(store: &Path, name: &str, version: &str) -> PackageEntry {
+        let store_path = format!("node/libs/{}-{}", name.replace('/', "+"), version);
+        let dir = store.join(&store_path).join("package");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            format!(r#"{{"name":"{name}","version":"{version}"}}"#),
+        ).unwrap();
+        std::fs::write(dir.join("index.js"), format!("module.exports='{name}@{version}'")).unwrap();
+        PackageEntry {
+            name: name.into(), version: version.into(), hash: None, store_path,
+            source_url: None, path: None,
+        }
+    }
+
+    fn nested(mut e: PackageEntry, path: &str) -> PackageEntry {
+        e.path = Some(path.into());
+        e
+    }
+
+    fn version_at(env: &Path, rel: &str) -> String {
+        let t = std::fs::read_to_string(env.join(rel).join("package.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+        v["version"].as_str().unwrap().to_string()
+    }
+
+    fn nested_packages(store: &Path) -> Vec<PackageEntry> {
+        vec![
+            store_pkg(store, "path-scurry", "1.2.0"),
+            nested(store_pkg(store, "lru-cache", "11.5.2"), "node_modules/path-scurry/node_modules/lru-cache"),
+            store_pkg(store, "lru-cache", "5.1.1"),
+        ]
+    }
+
+    fn tree(root: &Path) -> Vec<std::path::PathBuf> {
+        walkdir::WalkDir::new(root).sort_by_file_name().into_iter().filter_map(|e| e.ok())
+            .map(|e| e.path().strip_prefix(root).unwrap().to_path_buf()).collect()
+    }
+
+    #[test]
+    fn nested_install_keeps_own_version_whatever_the_order() {
+        let store = tempfile::TempDir::new().unwrap();
+        let base = nested_packages(store.path());
+        let perms: [[usize; 3]; 6] = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]];
+        for perm in perms {
+            let env = tempfile::TempDir::new().unwrap();
+            let node = NodeSection { packages: perm.iter().map(|&i| base[i].clone()).collect(), local: vec![] };
+            build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
+            assert_eq!(version_at(env.path(), "node_modules/lru-cache"), "5.1.1", "order {perm:?}");
+            assert_eq!(
+                version_at(env.path(), "node_modules/path-scurry/node_modules/lru-cache"),
+                "11.5.2", "order {perm:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_scoped_install_and_skipped_parent() {
+        let store = tempfile::TempDir::new().unwrap();
+        let env = tempfile::TempDir::new().unwrap();
+        let node = NodeSection {
+            packages: vec![
+                nested(store_pkg(store.path(), "@scope/inner", "3.0.0"), "node_modules/@scope/outer/node_modules/@scope/inner"),
+                store_pkg(store.path(), "@scope/outer", "2.0.0"),
+                // parent never installed: the nested entry is skipped, no stray dir.
+                nested(store_pkg(store.path(), "orphan", "1.0.0"), "node_modules/missing/node_modules/orphan"),
+            ],
+            local: vec![],
+        };
+        build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
+        assert_eq!(version_at(env.path(), "node_modules/@scope/outer/node_modules/@scope/inner"), "3.0.0");
+        assert!(!env.path().join("node_modules/missing").exists());
+    }
+
+    #[test]
+    fn nested_use_is_idempotent_and_never_writes_the_store() {
+        let store = tempfile::TempDir::new().unwrap();
+        let env = tempfile::TempDir::new().unwrap();
+        let node = NodeSection { packages: nested_packages(store.path()), local: vec![] };
+        let before = tree(store.path());
+        build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
+        let first = tree(env.path());
+        build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
+        assert_eq!(first, tree(env.path()), "second `kong use` must leave the same tree");
+        assert_eq!(before, tree(store.path()), "store must be untouched");
+        assert!(!store.path().join("node/libs/path-scurry-1.2.0/package/node_modules").exists());
+    }
+
+    #[test]
+    fn stale_wrong_toplevel_from_older_kong_is_corrected() {
+        let store = tempfile::TempDir::new().unwrap();
+        let env = tempfile::TempDir::new().unwrap();
+        let pkgs = nested_packages(store.path());
+        // Old kong: 11.5.2 hoisted at top level, nothing nested.
+        let mut old = NodeSection { packages: vec![pkgs[0].clone(), pkgs[1].clone()], local: vec![] };
+        old.packages[1].path = None;
+        build_node_modules(env.path(), env.path(), &old, store.path()).unwrap();
+        assert_eq!(version_at(env.path(), "node_modules/lru-cache"), "11.5.2");
+
+        let node = NodeSection { packages: pkgs, local: vec![] };
+        build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
+        assert_eq!(version_at(env.path(), "node_modules/lru-cache"), "5.1.1");
+        assert_eq!(version_at(env.path(), "node_modules/path-scurry/node_modules/lru-cache"), "11.5.2");
+        assert!(store.path().join("node/libs/lru-cache-11.5.2/package/index.js").is_file());
     }
 }

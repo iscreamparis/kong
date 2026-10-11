@@ -156,6 +156,11 @@ pub struct PackageEntry {
     pub store_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
+    /// Node only: lockfile key of a NESTED install
+    /// (`node_modules/path-scurry/node_modules/lru-cache`). `None` for top-level
+    /// entries and every other ecosystem, so old kong.rules files are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// Validate a local Node dependency and build its kong.rules entry.
@@ -366,6 +371,7 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
                     hash: Some(file_info.hash),
                     store_path,
                     source_url: Some(file_info.url),
+                    path: None,
                 });
                 trans
             } else {
@@ -374,7 +380,7 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
                 if first_visit {
                     packages.push(PackageEntry {
                         name: dep.name.clone(), version: dep.version.clone(), hash: None,
-                        store_path, source_url: None,
+                        store_path, source_url: None, path: None,
                     });
                 }
                 // Still need transitive deps — read from already-extracted METADATA
@@ -461,6 +467,7 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
                     hash: Some(file_info.hash),
                     store_path,
                     source_url: Some(file_info.url),
+                    path: dep.path.clone(),
                 });
             } else {
                 debug!(pkg = %dep.name, ver = %dep.version, "Already in store, skipping");
@@ -470,6 +477,7 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
                     hash: None,
                     store_path,
                     source_url: None,
+                    path: dep.path.clone(),
                 });
             }
         }
@@ -500,6 +508,7 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
                     hash: Some(file_info.hash),
                     store_path,
                     source_url: Some(file_info.url),
+                    path: None,
                 });
             } else {
                 debug!(pkg = %dep.name, ver = %dep.version, "Already in store, skipping");
@@ -509,6 +518,7 @@ pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> 
                     hash: None,
                     store_path,
                     source_url: None,
+                    path: None,
                 });
             }
         }
@@ -820,6 +830,7 @@ mod tests {
                     hash: Some("sha256:abc".to_string()),
                     store_path: "python/libs/requests-2.31.0-cp312-win_amd64".to_string(),
                     source_url: None,
+                    path: None,
                 }],
             }),
             node: None,
