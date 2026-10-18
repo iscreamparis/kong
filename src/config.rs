@@ -256,6 +256,20 @@ pub fn read_rules(path: &Path) -> Result<KongRules> {
     Ok(rules)
 }
 
+/// The `node.git` entries of the project's current kong.rules, so that
+/// `prepare_all` can reuse their pinned commits without a remote call. A
+/// missing, unreadable or pre-git file simply means "nothing pinned yet".
+fn previous_git_entries(project_dir: &Path) -> Vec<GitPackageEntry> {
+    let path = project_dir.join("kong.rules");
+    match read_rules(&path) {
+        Ok(rules) => rules.node.map(|n| n.git).unwrap_or_default(),
+        Err(e) => {
+            debug!(path = %path.display(), error = %format!("{e:#}"), "No previous git entries");
+            Vec::new()
+        }
+    }
+}
+
 pub fn write_rules(rules: &KongRules, path: &Path) -> Result<()> {
     let json = serde_json::to_string_pretty(rules)?;
     std::fs::write(path, json)
@@ -550,7 +564,13 @@ pub fn generate_rules_with_options(project_dir: &Path, opts: &RulesOptions) -> R
         info!(count = node_deps.len(), version = %runtime.version, "Processing Node packages");
         let mut packages = Vec::new();
         let mut local = Vec::new();
+        let mut sources = Vec::new();
         for dep in &node_deps {
+            // Kong git dependency: prepared below in one pass over all of them.
+            if let Some(ref src) = dep.git {
+                sources.push(src.clone());
+                continue;
+            }
             // Local (`file:`/`link:`) package: validated and recorded, never
             // fetched from the registry nor copied into the store.
             if let Some(ref src) = dep.local {
@@ -559,8 +579,38 @@ pub fn generate_rules_with_options(project_dir: &Path, opts: &RulesOptions) -> R
             }
             packages.push(node_package_entry(dep, &store_root, force)?);
         }
+        let mut git = Vec::new();
+        if !sources.is_empty() {
+            let previous = previous_git_entries(project_dir);
+            let h = crate::node::git::hooks();
+            let build_closure = h.build.map(|f| {
+                move |req: &crate::node::git::BuildRequest| f(req)
+            });
+            let builder: Option<
+                &dyn Fn(&crate::node::git::BuildRequest) -> Result<crate::node::git::BuildRecord>,
+            > = build_closure.as_ref().map(|c| c as _);
+            let prepare_opts = crate::node::git::PrepareOptions {
+                update: opts.update_git,
+                force: opts.force,
+                git_env: (h.git_env)(),
+                builder,
+                host: crate::node::platform::HostTriple::current(),
+            };
+            let (entries, report) =
+                crate::node::git::prepare_all(&store_root, &sources, &previous, &prepare_opts)?;
+            info!(
+                clones = report.cloned,
+                builds = report.built,
+                resolved_remote = report.resolved_remote,
+                clone_seconds = report.clone_seconds,
+                build_seconds = report.build_seconds,
+                "Prepared git dependencies"
+            );
+            git = entries;
+            git.sort_by(|a, b| a.name.cmp(&b.name));
+        }
         let entry = RuntimeEntry { version: runtime.version, store_path: runtime.store_path };
-        (Some(entry), Some(NodeSection { packages, local, git: Vec::new() }))
+        (Some(entry), Some(NodeSection { packages, local, git }))
     } else {
         (None, None)
     };
@@ -1096,5 +1146,41 @@ mod tests {
 
         // Now resolution returns exactly what `kong use` would key the env by.
         assert_eq!(resolve_project_name(&proj), "recorded-env-name");
+    }
+
+    #[test]
+    fn previous_git_entries_tolerates_missing_invalid_and_old_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert!(previous_git_entries(tmp.path()).is_empty());
+
+        std::fs::write(tmp.path().join("kong.rules"), "{ not json").unwrap();
+        assert!(previous_git_entries(tmp.path()).is_empty());
+
+        let old = r#"{"version":1,"project":"p","generated":"x","node":{"packages":[]}}"#;
+        std::fs::write(tmp.path().join("kong.rules"), old).unwrap();
+        assert!(previous_git_entries(tmp.path()).is_empty());
+
+        let entry = GitPackageEntry {
+            name: "@fx/core".into(),
+            version: "1.0.0".into(),
+            source: "git+file:///r#v1.0.0".into(),
+            repo: "file:///r".into(),
+            reference: Some("v1.0.0".into()),
+            commit: "c".repeat(40),
+            path: "packages/core".into(),
+            build: None,
+            rust_targets: vec![],
+            declared_by: "package.json".into(),
+            store_path: "node/git/r-00000000/cccccccccccc".into(),
+            lock_dir: None,
+            packages: vec![],
+            local: vec![],
+        };
+        let rules = serde_json::json!({
+            "version": 1, "project": "p", "generated": "x",
+            "node": { "packages": [], "git": [entry.clone()] }
+        });
+        std::fs::write(tmp.path().join("kong.rules"), rules.to_string()).unwrap();
+        assert_eq!(previous_git_entries(tmp.path()), vec![entry]);
     }
 }
