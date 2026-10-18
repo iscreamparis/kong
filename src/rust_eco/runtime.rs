@@ -49,23 +49,38 @@ pub fn ensure_runtime(store_root: &Path) -> Result<RustRuntime> {
     Ok(RustRuntime { version, store_path, _cargo_exe: cargo_exe, _rustc_exe: rustc_exe })
 }
 
+/// Ensure the std library for an extra compilation `target` is merged into the
+/// Kong-managed toolchain `runtime`.
+///
+/// `ensure_runtime` only installs rust-std for the host. Git-dependency build steps
+/// (e.g. a wasm32 package) need extra std libraries (shared §4), so the matching
+/// `rust-std` component of the same toolchain version is downloaded once and merged
+/// into the toolchain directory. No network is used when it is already present.
+pub fn ensure_target(store_root: &Path, runtime: &RustRuntime, target: &str) -> Result<()> {
+    let toolchain_dir = store_root.join(&runtime.store_path);
+    let lib_dir = toolchain_dir.join("lib").join("rustlib").join(target).join("lib");
+    if lib_dir.is_dir() {
+        debug!(version = %runtime.version, target = %target, "Rust target already in toolchain");
+        return Ok(());
+    }
+
+    info!(version = %runtime.version, target = %target,
+        "Adding Rust target {target} to toolchain {}", runtime.version);
+    let url = format!("https://static.rust-lang.org/dist/channel-rust-{}.toml", runtime.version);
+    let manifest = fetch_manifest(&url)?;
+    let std_url = component_url(&manifest, "rust-std", target)?;
+    std::fs::create_dir_all(&toolchain_dir)?;
+    download_component(&std_url, &toolchain_dir, "rust-std")
+        .with_context(|| format!("failed to download rust-std for target '{target}'"))?;
+    Ok(())
+}
+
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
 /// Fetch and parse channel-rust-stable.toml to get component download URLs.
 fn resolve_components(target: &str) -> Result<(String, String, String, String)> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("kong-dependency-manager/0.1")
-        .build()?;
-
     info!("Fetching Rust stable channel manifest");
-    let text = client
-        .get(CHANNEL_URL)
-        .send()
-        .context("failed to fetch Rust channel manifest")?
-        .text()
-        .context("failed to read Rust channel manifest")?;
-
-    let manifest: toml::Value = text.parse().context("failed to parse channel manifest TOML")?;
+    let manifest = fetch_manifest(CHANNEL_URL)?;
 
     // manifest["pkg"]["rustc"]["version"] => "1.86.0 (05f9846f8 2025-03-31)"
     let version_str = manifest
@@ -85,6 +100,22 @@ fn resolve_components(target: &str) -> Result<(String, String, String, String)> 
 
     debug!(version = %version, cargo = %cargo_url, rustc = %rustc_url, std = %std_url, "Resolved Rust component URLs");
     Ok((version, cargo_url, rustc_url, std_url))
+}
+
+/// Fetch and parse a Rust channel manifest (`channel-rust-*.toml`).
+fn fetch_manifest(url: &str) -> Result<toml::Value> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("kong-dependency-manager/0.1")
+        .build()?;
+
+    let text = client
+        .get(url)
+        .send()
+        .context("failed to fetch Rust channel manifest")?
+        .text()
+        .context("failed to read Rust channel manifest")?;
+
+    text.parse().context("failed to parse channel manifest TOML")
 }
 
 /// Extract a component's tar.gz download URL from the channel manifest.
@@ -202,5 +233,21 @@ mod tests {
     #[test]
     fn rust_target_is_nonempty() {
         assert!(!rust_target().is_empty());
+    }
+
+    #[test]
+    fn ensure_target_is_noop_when_present() {
+        let store = tempfile::TempDir::new().unwrap();
+        let store_path = "rust/toolchain/1.0.0".to_string();
+        let toolchain = store.path().join(&store_path);
+        std::fs::create_dir_all(toolchain.join("lib/rustlib/wasm32-unknown-unknown/lib")).unwrap();
+        let runtime = RustRuntime {
+            version: "1.0.0".to_string(),
+            store_path,
+            _cargo_exe: toolchain.join("bin/cargo"),
+            _rustc_exe: toolchain.join("bin/rustc"),
+        };
+        // The version 1.0.0 manifest is never fetched: the target dir is already there.
+        ensure_target(store.path(), &runtime, "wasm32-unknown-unknown").unwrap();
     }
 }
