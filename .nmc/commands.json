@@ -1,0 +1,20 @@
+[
+  {
+    "name": "realcase-wsl",
+    "command": [
+      "bash",
+      "-c",
+      "export PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin; bash scripts/realcase/royal-fiesta.sh --game /root/nmc/repos/royal-fiesta --branch nmc/68-kong-dependencies-from-github-b2--m4-royal-fiesta-builds-from --out /root/nmc/evidence/68-m4/royal-fiesta-git-deps"
+    ],
+    "timeout_s": 3600
+  },
+  {
+    "name": "realcase-vm",
+    "command": [
+      "bash",
+      "-c",
+      "export PATH=/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin; cargo build --release --no-default-features --target x86_64-unknown-linux-musl && bash scripts/realcase/royal-fiesta.sh --kong target/x86_64-unknown-linux-musl/release/kong --host \"${RF_VM_HOST:-etcito-vm}\" --branch nmc/68-kong-dependencies-from-github-b2--m4-royal-fiesta-builds-from --out /root/nmc/evidence/68-m4/royal-fiesta-git-deps"
+    ],
+    "timeout_s": 3600
+  }
+]
