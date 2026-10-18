@@ -37,12 +37,29 @@ pub fn link_package(src: &Path, dst: &Path) -> Result<()> {
             if let Some(p) = dst_path.parent() {
                 std::fs::create_dir_all(p)?;
             }
-            link_file(entry.path(), &dst_path)
+            link_file_in_tree(entry.path(), &dst_path)
                 .with_context(|| format!("failed to link file: {}", entry.path().display()))?;
         }
     }
 
     Ok(())
+}
+
+/// Hard link a file of a package that must stay INSIDE the project tree: on a
+/// cross-device error it copies, it never symlinks. A file symlink makes Node
+/// resolve the module's realpath into the store, where its sibling packages
+/// (vite -> rolldown) do not exist: `ERR_MODULE_NOT_FOUND` on a store on another
+/// filesystem (a tmpfs /tmp), measured by the Royal Fiesta real case.
+fn link_file_in_tree(src: &Path, dst: &Path) -> Result<()> {
+    match std::fs::hard_link(src, dst) {
+        Ok(()) => Ok(()),
+        Err(e) if is_cross_device(&e) => {
+            std::fs::copy(src, dst)
+                .with_context(|| format!("copy fallback failed: {}", src.display()))?;
+            Ok(())
+        }
+        Err(e) => Err(e).with_context(|| format!("hard_link failed: {}", src.display())),
+    }
 }
 
 /// Create a hard link for a file, falling back to symlink then copy on
