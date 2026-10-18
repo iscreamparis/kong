@@ -22,8 +22,8 @@ done
 
 THREADS="${NMC_CPUS:-1}"
 
-echo "proof-m3: warming the cargo registry (cargo fetch; no-op when already warm)"
-if [ -f Cargo.lock ]; then cargo fetch --locked; else cargo fetch; fi
+# The cargo registry and build cache come from Kong (`kong rules && kong use`), never from cargo fetch.
+if command -v kong >/dev/null 2>&1 && [ -f kong.rules ] && kong env >/dev/null 2>&1; then eval "$(kong env)"; fi
 
 # --include-ignored is harmless now that the test's #[ignore] is removed.
 OUT="$(mktemp)"
