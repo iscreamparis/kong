@@ -15,6 +15,8 @@ pub mod install;
 pub mod spec;
 
 #[cfg(test)]
+mod proof_m2;
+#[cfg(test)]
 pub(crate) mod proof_support;
 
 /// Keep all build inputs explicit so builders need no process-global setup.
