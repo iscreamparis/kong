@@ -822,21 +822,7 @@ pub fn eject_project(project_dir: &Path) -> Result<()> {
     let dep_index = build_dep_index(&all_projects);
 
     // ── 2. Collect store paths used only by this project ────────────────
-    let mut exclusive_store_paths: Vec<String> = Vec::new();
-
-    let all_packages = rules.python.as_ref().map(|s| &s.packages[..]).unwrap_or(&[])
-        .iter()
-        .chain(rules.node.as_ref().map(|s| &s.packages[..]).unwrap_or(&[]).iter())
-        .chain(rules.rust.as_ref().map(|s| &s.packages[..]).unwrap_or(&[]).iter());
-
-    for pkg in all_packages {
-        let eco = ecosystem_for_store_path(&pkg.store_path);
-        let key = (eco, pkg.name.clone(), pkg.version.clone());
-        let user_count = dep_index.get(&key).map(|v| v.len()).unwrap_or(0);
-        if user_count <= 1 {
-            exclusive_store_paths.push(pkg.store_path.clone());
-        }
-    }
+    let exclusive_store_paths = exclusive_store_paths(&rules, &dep_index);
 
     // ── 3. Remove project junctions ─────────────────────────────────────
     link::clean_project_junctions(project_dir)?;
@@ -852,14 +838,7 @@ pub fn eject_project(project_dir: &Path) -> Result<()> {
     }
 
     // ── 5. Remove exclusive store entries ────────────────────────────────
-    for sp in &exclusive_store_paths {
-        let full = store_root.join(sp);
-        if full.exists() {
-            std::fs::remove_dir_all(&full)
-                .with_context(|| format!("failed to remove store entry: {}", full.display()))?;
-            debug!(path = %sp, "Removed exclusive store entry");
-        }
-    }
+    remove_store_entries(&store_root, &exclusive_store_paths)?;
     if !exclusive_store_paths.is_empty() {
         info!("  ✓ Removed {} store entries used only by this project", exclusive_store_paths.len());
     }
@@ -890,7 +869,14 @@ fn ecosystem_for_store_path(store_path: &str) -> String {
 }
 
 /// Build a deps → projects usage index.
-fn build_dep_index(
+///
+/// A git dependency is keyed by `("node-git", repo, commit)` because its
+/// commit dir is shared by every project pinned to the same repository and
+/// commit, whatever name or path each declares. Its own registry packages
+/// live in the shared `node/libs` store, so they count as ordinary `node`
+/// users: a package a git dep needs is never removed while another project
+/// (or another git dep) still uses it.
+pub(crate) fn build_dep_index(
     projects: &[(String, PathBuf)],
 ) -> std::collections::HashMap<(String, String, String), Vec<String>> {
     let mut index: std::collections::HashMap<(String, String, String), Vec<String>> =
@@ -911,9 +897,16 @@ fn build_dep_index(
             }
         }
         if let Some(ref node) = rules.node {
-            for pkg in &node.packages {
+            let git_packages = node.git.iter().flat_map(|e| e.packages.iter());
+            for pkg in node.packages.iter().chain(git_packages) {
                 index
                     .entry(("node".into(), pkg.name.clone(), pkg.version.clone()))
+                    .or_default()
+                    .push(proj_name.clone());
+            }
+            for entry in &node.git {
+                index
+                    .entry(("node-git".into(), entry.repo.clone(), entry.commit.clone()))
                     .or_default()
                     .push(proj_name.clone());
             }
@@ -929,6 +922,66 @@ fn build_dep_index(
     }
 
     index
+}
+
+/// Store paths of `rules` that no other indexed project uses.
+///
+/// A count of 0 also counts as exclusive: the project being ejected may not be
+/// registered (so absent from the index), and then nobody else uses its deps.
+/// A git entry contributes its whole commit dir (checkout, own `node_modules`,
+/// markers, build log), since those are only meaningful for that commit. The
+/// result is deduplicated because the same `node/libs` package can be listed by
+/// the project and by one or more of its git deps.
+pub(crate) fn exclusive_store_paths(
+    rules: &KongRules,
+    index: &std::collections::HashMap<(String, String, String), Vec<String>>,
+) -> Vec<String> {
+    let users = |key: (String, String, String)| index.get(&key).map(|v| v.len()).unwrap_or(0);
+    let mut paths: Vec<String> = Vec::new();
+    let mut push = |sp: &str| {
+        if !paths.iter().any(|p| p == sp) {
+            paths.push(sp.to_string());
+        }
+    };
+
+    let git = rules.node.as_ref().map(|s| &s.git[..]).unwrap_or(&[]);
+    let all_packages = rules.python.as_ref().map(|s| &s.packages[..]).unwrap_or(&[])
+        .iter()
+        .chain(rules.node.as_ref().map(|s| &s.packages[..]).unwrap_or(&[]).iter())
+        .chain(git.iter().flat_map(|e| e.packages.iter()))
+        .chain(rules.rust.as_ref().map(|s| &s.packages[..]).unwrap_or(&[]).iter());
+
+    for pkg in all_packages {
+        let eco = ecosystem_for_store_path(&pkg.store_path);
+        if users((eco, pkg.name.clone(), pkg.version.clone())) <= 1 {
+            push(&pkg.store_path);
+        }
+    }
+    for entry in git {
+        if users(("node-git".into(), entry.repo.clone(), entry.commit.clone())) <= 1 {
+            push(&entry.store_path);
+        }
+    }
+
+    paths
+}
+
+/// Remove each store-relative path under `store_root` and return how many
+/// existed and were removed. Taking the root explicitly keeps it testable
+/// against a temporary store; a path already gone is not an error, so a
+/// half-finished earlier eject can simply be re-run.
+pub(crate) fn remove_store_entries(store_root: &Path, paths: &[String]) -> Result<usize> {
+    let mut removed = 0;
+    for sp in paths {
+        let full = store_root.join(sp);
+        if full.exists() {
+            std::fs::remove_dir_all(&full)
+                .with_context(|| format!("failed to remove store entry: {}", full.display()))?;
+            debug!(path = %sp, "Removed exclusive store entry");
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 /// Remove a symlink/junction or a real directory.
@@ -1538,5 +1591,90 @@ mod tests {
         for (path, content) in &files {
             assert_eq!(&std::fs::read_to_string(path).unwrap(), content, "{}", path.display());
         }
+    }
+
+    /// Eject removes the commit dir and inner packages only this project uses,
+    /// and keeps a commit dir another project is pinned to.
+    #[test]
+    fn eject_removes_exclusive_git_commit_dir_and_keeps_shared() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = tempfile::TempDir::new().unwrap();
+        let s = store.path();
+        let c1 = "1111111111111111111111111111111111111111";
+        let c2 = "2222222222222222222222222222222222222222";
+        let repo = "file:///fixtures/core";
+
+        let pkg = |name: &str| PackageEntry {
+            name: name.into(),
+            version: "1.0.0".into(),
+            hash: None,
+            store_path: format!("node/libs/{name}-1.0.0"),
+            source_url: None,
+            path: None,
+        };
+        let git = |commit: &str, packages: Vec<PackageEntry>| config::GitPackageEntry {
+            name: "@fx/core".into(),
+            version: "0.1.0".into(),
+            source: format!("git+{repo}#{commit}"),
+            repo: repo.into(),
+            reference: Some(commit.into()),
+            commit: commit.into(),
+            path: String::new(),
+            build: None,
+            rust_targets: Vec::new(),
+            declared_by: "package.json".into(),
+            store_path: format!("node/git/core-1/{}", &commit[..12]),
+            lock_dir: None,
+            packages,
+            local: Vec::new(),
+        };
+        let rules = |project: &str, git: Vec<config::GitPackageEntry>| KongRules {
+            version: 1,
+            project: project.into(),
+            generated: "now".into(),
+            runtimes: None,
+            python: None,
+            node: Some(NodeSection { packages: Vec::new(), local: Vec::new(), git }),
+            rust: None,
+            brew: None,
+            scripts: Default::default(),
+            services: Vec::new(),
+        };
+
+        // A: C1 (shared with B, inner package `shared-dep`) and C2 (alone,
+        // inner package `only-a`). B: C1 only.
+        let a = rules("a", vec![
+            git(c1, vec![pkg("shared-dep")]),
+            git(c2, vec![pkg("only-a")]),
+        ]);
+        let b = rules("b", vec![git(c1, vec![pkg("shared-dep")])]);
+        let (a_dir, b_dir) = (tmp.path().join("a"), tmp.path().join("b"));
+        for (dir, r) in [(&a_dir, &a), (&b_dir, &b)] {
+            std::fs::create_dir_all(dir).unwrap();
+            config::write_rules(r, &dir.join("kong.rules")).unwrap();
+        }
+
+        let c1_dir = s.join(format!("node/git/core-1/{}", &c1[..12]));
+        let c2_dir = s.join(format!("node/git/core-1/{}", &c2[..12]));
+        let only_a = s.join("node/libs/only-a-1.0.0");
+        let shared = s.join("node/libs/shared-dep-1.0.0");
+        for d in [&c1_dir, &c2_dir] {
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join(".kong-cloned"), "{}").unwrap();
+        }
+        for d in [&only_a, &shared] {
+            std::fs::create_dir_all(d.join("package")).unwrap();
+            std::fs::write(d.join("package/index.js"), "").unwrap();
+        }
+
+        let index = build_dep_index(&[("a".into(), a_dir.clone()), ("b".into(), b_dir.clone())]);
+        let paths = exclusive_store_paths(&a, &index);
+        let removed = remove_store_entries(s, &paths).unwrap();
+
+        assert_eq!(removed, 2, "exclusive paths: {paths:?}");
+        assert!(!c2_dir.exists(), "exclusive commit dir must be removed");
+        assert!(!only_a.exists(), "exclusive inner package must be removed");
+        assert!(c1_dir.join(".kong-cloned").is_file(), "shared commit dir must remain");
+        assert!(shared.join("package/index.js").is_file(), "shared inner package must remain");
     }
 }
