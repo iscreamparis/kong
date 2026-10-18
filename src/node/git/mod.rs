@@ -2,3 +2,6 @@
 //! `<store>/node/git`, then linked into projects by `kong use`.
 
 pub mod spec;
+
+#[cfg(test)]
+pub(crate) mod proof_support;
