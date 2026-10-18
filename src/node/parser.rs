@@ -1,8 +1,9 @@
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
+use super::git::spec::{self, GitSource};
 use super::platform::{self, HostTriple};
 
 /// A parsed dependency from a Node.js manifest.
@@ -30,6 +31,10 @@ pub struct NodeDep {
     /// npm puts a second version of `b` that only `a` sees. `None` for a
     /// top-level (hoisted) entry and for every non-lockfile source.
     pub path: Option<String>,
+    /// `Some` for a kong git dependency (a git spec named by a `kong.git` block):
+    /// it is cloned into the store and linked from there instead of being taken
+    /// from the lockfile. `None` for every registry and local package.
+    pub git: Option<GitSource>,
 }
 
 /// Where a local (non-registry) Node package lives, as declared by the project.
@@ -302,6 +307,7 @@ pub fn parse_package_lock(path: &Path) -> Result<Vec<NodeDep>> {
                         .unwrap_or("0.0.0")
                         .to_string();
                     deps.push(NodeDep {
+                        git: None,
                         path: None,
                         name,
                         version,
@@ -355,6 +361,7 @@ pub fn parse_package_lock(path: &Path) -> Result<Vec<NodeDep>> {
 
             if !version.is_empty() {
                 deps.push(NodeDep {
+                    git: None,
                     path: nested_install_path(key),
                     name,
                     version,
@@ -411,6 +418,7 @@ fn parse_v1_level(
         {
             if !is_tarball_path(p) {
                 out.push(NodeDep {
+                    git: None,
                     path: None,
                     name: name.clone(),
                     version: "0.0.0".into(),
@@ -443,6 +451,7 @@ fn parse_v1_level(
 
         if !version.is_empty() {
             out.push(NodeDep {
+                git: None,
                 path: if parent.is_some() {
                     Some(key.clone())
                 } else {
@@ -500,6 +509,7 @@ pub fn parse_package_json(path: &Path) -> Result<Vec<NodeDep>> {
                         );
                     }
                     deps.push(NodeDep {
+                        git: None,
                         path: None,
                         name: name.clone(),
                         version: "0.0.0".into(),
@@ -525,6 +535,7 @@ pub fn parse_package_json(path: &Path) -> Result<Vec<NodeDep>> {
 
                 if !cleaned.is_empty() {
                     deps.push(NodeDep {
+                        git: None,
                         path: None,
                         // package.json's dependency map carries no os/cpu/libc —
                         // those live in each dependency's own package.json, which
@@ -546,6 +557,172 @@ pub fn parse_package_json(path: &Path) -> Result<Vec<NodeDep>> {
     }
 
     Ok(deps)
+}
+
+/// Dependency sections a `kong.git` entry may point into, in npm's order.
+const GIT_DEP_SECTIONS: [&str; 3] = ["dependencies", "devDependencies", "optionalDependencies"];
+
+/// Collect the kong git dependencies declared by the project: the root
+/// `package.json` plus each workspace member's `package.json` (shared §1).
+/// Sorted by name. A project whose manifests carry no `kong` key gets an empty
+/// vec, so its resolution stays exactly what it was before git dependencies.
+pub fn git_declarations(project_dir: &Path) -> Result<Vec<GitSource>> {
+    let root_path = project_dir.join("package.json");
+    if !root_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(&root_path)
+        .with_context(|| format!("Failed to read {}", root_path.display()))?;
+    let root: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {}", root_path.display()))?;
+    let root_has_kong = root.get("kong").is_some();
+
+    // Manifests that carry a `kong` key: (path relative to the project, JSON).
+    let mut manifests: Vec<(String, serde_json::Value)> = Vec::new();
+    for member in workspace_members(project_dir, &root) {
+        let rel = format!("{member}/package.json");
+        let path = project_dir.join(&rel);
+        let parsed = std::fs::read_to_string(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).map_err(Into::into));
+        match parsed {
+            Ok(json) if json.get("kong").is_some() => manifests.push((rel, json)),
+            Ok(_) => {}
+            // Before git dependencies kong never read member manifests; a broken
+            // one must not fail a project that declares nothing from its root.
+            Err(e) if !root_has_kong => {
+                warn!(manifest = %rel, error = %e, "skipping unreadable workspace manifest");
+            }
+            Err(e) => return Err(e.context(format!("Failed to parse {}", path.display()))),
+        }
+    }
+    if root_has_kong {
+        manifests.insert(0, ("package.json".to_string(), root));
+    }
+
+    let mut sources: Vec<GitSource> = Vec::new();
+    for (manifest, json) in &manifests {
+        let Some(block) = json.get("kong").and_then(|k| k.get("git")) else {
+            continue;
+        };
+        let Some(block) = block.as_object() else {
+            bail!(
+                "invalid kong.git block:\n  \
+                 declared by : {manifest} (kong.git)\n  \
+                 problem     : expected an object mapping dependency names to entries, found {block}"
+            );
+        };
+        for (name, value) in block {
+            let entry = spec::parse_kong_git_entry(name, value, manifest)?;
+            let declared = GIT_DEP_SECTIONS.iter().find_map(|section| {
+                json.get(*section)
+                    .and_then(|s| s.get(name))
+                    .map(|v| (*section, v))
+            });
+            let (section, spec_str) = match declared {
+                Some((section, serde_json::Value::String(s))) if spec::is_git_spec(s) => {
+                    (section, s.clone())
+                }
+                Some((section, v)) => bail!(
+                    "git dependency '{name}' is not declared with a git spec:\n  \
+                     declared by : {manifest} (kong.git \"{name}\")\n  \
+                     dependency  : {manifest} {section} \"{name}\": {v}\n\
+                     Use a git spec (github:ORG/REPO#ref, git+https://…, git+ssh://…, git+file://…) \
+                     as the dependency value, or remove the kong.git entry."
+                ),
+                None => bail!(
+                    "git dependency '{name}' is missing from the dependencies:\n  \
+                     declared by : {manifest} (kong.git \"{name}\")\n  \
+                     dependency  : not found in {manifest} dependencies, devDependencies or optionalDependencies\n\
+                     Add \"{name}\": \"<git spec>\" to {manifest} dependencies, or remove the kong.git entry."
+                ),
+            };
+            let origin =
+                format!("{manifest} {section} \"{name}\": \"{spec_str}\" (kong.git \"{name}\")");
+            let (repo, reference) = spec::parse_git_spec(&spec_str).map_err(|e| {
+                anyhow::anyhow!(
+                    "git dependency '{name}' has an invalid source:\n  \
+                     source      : {spec_str}\n  \
+                     commit      : (unresolved)\n  \
+                     declared by : {origin}\n\
+                     {e}"
+                )
+            })?;
+            if let Some(prev) = sources.iter().find(|s| &s.name == name) {
+                bail!(
+                    "git dependency '{name}' is declared twice:\n  \
+                     declared by : {}\n  \
+                     and by      : {origin}\n\
+                     Declare each git dependency in one package.json only (it is hoisted to the \
+                     project's node_modules/{name}).",
+                    prev.origin
+                );
+            }
+            debug!(pkg = %name, manifest = %manifest, repo = %repo, "kong git dependency declared");
+            sources.push(GitSource {
+                name: name.clone(),
+                spec: spec_str,
+                repo,
+                reference,
+                path: entry.path,
+                build: entry.build,
+                rust_targets: entry.rust_targets,
+                origin,
+                declared_by: manifest.clone(),
+            });
+        }
+    }
+    sources.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(sources)
+}
+
+/// Workspace member directories (relative, `/` separators) from the root
+/// `workspaces` field: an array, or an object's `packages` array. An entry is a
+/// literal directory or `dir/*` (every direct subdirectory holding a
+/// package.json); any other glob is ignored with a warning.
+fn workspace_members(project_dir: &Path, root: &serde_json::Value) -> Vec<String> {
+    let entries = match root.get("workspaces") {
+        Some(serde_json::Value::Array(a)) => a.clone(),
+        Some(serde_json::Value::Object(o)) => o
+            .get("packages")
+            .and_then(|p| p.as_array())
+            .cloned()
+            .unwrap_or_default(),
+        _ => return Vec::new(),
+    };
+    let mut members: Vec<String> = Vec::new();
+    for entry in entries.iter().filter_map(|e| e.as_str()) {
+        let norm = entry.replace('\\', "/");
+        let norm = norm.trim_start_matches("./").trim_end_matches('/');
+        let mut found: Vec<String> = Vec::new();
+        if let Some(parent) = norm.strip_suffix("/*").filter(|p| !has_glob(p)) {
+            let Ok(read) = std::fs::read_dir(project_dir.join(parent)) else {
+                continue;
+            };
+            for e in read.flatten() {
+                if e.path().join("package.json").is_file() {
+                    if let Some(n) = e.file_name().to_str() {
+                        found.push(format!("{parent}/{n}"));
+                    }
+                }
+            }
+            found.sort();
+        } else if has_glob(norm) {
+            warn!(workspace = %entry, "unsupported workspace glob ignored for kong.git declarations (only `dir` and `dir/*` are read)");
+        } else if !norm.is_empty() && project_dir.join(norm).join("package.json").is_file() {
+            found.push(norm.to_string());
+        }
+        for m in found {
+            if !members.contains(&m) {
+                members.push(m);
+            }
+        }
+    }
+    members
+}
+
+fn has_glob(p: &str) -> bool {
+    p.contains(['*', '?', '[', ']', '{', '}', '!'])
 }
 
 /// Install location of a NESTED lockfile entry, or `None` for a top-level one.
@@ -624,6 +801,7 @@ fn local_dep_from_link(
         .unwrap_or("0.0.0")
         .to_string();
     Some(NodeDep {
+        git: None,
         path: None,
         name: leaf_name(key),
         version,
@@ -990,6 +1168,7 @@ mod tests {
 
     fn dep(name: &str, os: &[&str], cpu: &[&str], libc: &[&str], optional: bool) -> NodeDep {
         NodeDep {
+            git: None,
             path: None,
             name: name.into(),
             version: "1.0.0".into(),
@@ -1160,5 +1339,141 @@ mod tests {
             p("c", "3.0.0").as_deref(),
             Some("node_modules/a/node_modules/b/node_modules/c")
         );
+    }
+
+    fn write_manifest(dir: &Path, rel: &str, json: &str) {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, json).unwrap();
+    }
+
+    #[test]
+    fn git_declarations_from_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_manifest(
+            tmp.path(),
+            "package.json",
+            r#"{ "name": "app",
+                 "dependencies": { "vue": "^3.5.0", "@fx/core": "git+https://github.com/fx/core.git#v1.0.0" },
+                 "kong": { "git": { "@fx/core": { "path": "./packages/core/", "build": "scripts/build.sh" } } } }"#,
+        );
+        let srcs = git_declarations(tmp.path()).unwrap();
+        assert_eq!(srcs.len(), 1);
+        let s = &srcs[0];
+        assert_eq!(s.name, "@fx/core");
+        assert_eq!(s.repo, "https://github.com/fx/core.git");
+        assert_eq!(s.reference, spec::GitRef::Name("v1.0.0".into()));
+        assert_eq!(s.path, "packages/core");
+        assert_eq!(s.build.as_deref(), Some("scripts/build.sh"));
+        assert_eq!(s.declared_by, "package.json");
+        assert_eq!(
+            s.origin,
+            r#"package.json dependencies "@fx/core": "git+https://github.com/fx/core.git#v1.0.0" (kong.git "@fx/core")"#
+        );
+    }
+
+    #[test]
+    fn git_declarations_from_workspace_member() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_manifest(
+            tmp.path(),
+            "package.json",
+            r#"{ "name": "mono", "workspaces": ["apps/*", "packages/**"] }"#,
+        );
+        write_manifest(tmp.path(), "apps/api/package.json", r#"{ "name": "api" }"#);
+        write_manifest(
+            tmp.path(),
+            "apps/web/package.json",
+            r#"{ "name": "web",
+                 "devDependencies": { "@fx/raa": "github:fx/raa#main" },
+                 "kong": { "git": { "@fx/raa": {} } } }"#,
+        );
+        let srcs = git_declarations(tmp.path()).unwrap();
+        assert_eq!(srcs.len(), 1);
+        assert_eq!(srcs[0].declared_by, "apps/web/package.json");
+        assert_eq!(srcs[0].path, "");
+        assert_eq!(
+            srcs[0].origin,
+            r#"apps/web/package.json devDependencies "@fx/raa": "github:fx/raa#main" (kong.git "@fx/raa")"#
+        );
+    }
+
+    #[test]
+    fn git_declarations_duplicate_across_manifests_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let decl = r#""dependencies": { "@fx/core": "github:fx/core" },
+                      "kong": { "git": { "@fx/core": {} } }"#;
+        write_manifest(
+            tmp.path(),
+            "package.json",
+            &format!(
+                r#"{{ "name": "mono", "workspaces": {{ "packages": ["apps/web"] }}, {decl} }}"#
+            ),
+        );
+        write_manifest(
+            tmp.path(),
+            "apps/web/package.json",
+            &format!(r#"{{ "name": "web", {decl} }}"#),
+        );
+        let err = format!("{:#}", git_declarations(tmp.path()).unwrap_err());
+        assert!(err.contains("@fx/core"), "{err}");
+        assert!(err.contains("package.json dependencies"), "{err}");
+        assert!(err.contains("apps/web/package.json"), "{err}");
+    }
+
+    #[test]
+    fn git_declarations_name_missing_from_dependencies_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_manifest(
+            tmp.path(),
+            "package.json",
+            r#"{ "dependencies": { "vue": "^3.5.0" }, "kong": { "git": { "@fx/core": {} } } }"#,
+        );
+        let err = format!("{:#}", git_declarations(tmp.path()).unwrap_err());
+        assert!(err.contains("@fx/core"), "{err}");
+        assert!(
+            err.contains("package.json (kong.git \"@fx/core\")"),
+            "{err}"
+        );
+
+        // Present, but not a git spec: the error names the entry and the dependency.
+        write_manifest(
+            tmp.path(),
+            "package.json",
+            r#"{ "dependencies": { "@fx/core": "^1.0.0" }, "kong": { "git": { "@fx/core": {} } } }"#,
+        );
+        let err = format!("{:#}", git_declarations(tmp.path()).unwrap_err());
+        assert!(err.contains("kong.git \"@fx/core\""), "{err}");
+        assert!(err.contains("dependencies \"@fx/core\""), "{err}");
+    }
+
+    #[test]
+    fn git_declarations_without_kong_key_is_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_manifest(
+            tmp.path(),
+            "package.json",
+            r#"{ "workspaces": ["apps/*"], "dependencies": { "x": "github:fx/x" } }"#,
+        );
+        write_manifest(tmp.path(), "apps/web/package.json", r#"{ "name": "web" }"#);
+        assert!(git_declarations(tmp.path()).unwrap().is_empty());
+        let empty = tempfile::TempDir::new().unwrap();
+        assert!(git_declarations(empty.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn git_declarations_github_and_git_https_give_same_repo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_manifest(
+            tmp.path(),
+            "package.json",
+            r#"{ "dependencies": { "b": "github:Fx/Core#v1", "a": "git+https://github.com/Fx/Core.git#v1" },
+                 "kong": { "git": { "b": {}, "a": {} } } }"#,
+        );
+        let srcs = git_declarations(tmp.path()).unwrap();
+        let names: Vec<&str> = srcs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["a", "b"]);
+        assert_eq!(srcs[0].repo, srcs[1].repo);
+        assert_eq!(srcs[0].repo, "https://github.com/Fx/Core.git");
     }
 }
