@@ -7,8 +7,29 @@
 #        [--kong <binary>] [--host <ssh target>] [--out <dir>] [--keep]
 # Local run: writes transcript-wsl.txt, dist-listing.txt, kong.rules.json, timings.txt.
 # --host H: writes ONLY transcript-vm.txt (the VM run, or the reason it was not performed).
-# Slow (cold cargo/wasm build): run it from a programmatic card (.nmc/commands.json).
+#   Without --kong it builds the static musl binary (target x86_64-unknown-linux-musl).
+#   --host uses ssh/scp, so only the supervisor runs it, outside the sandbox, never a card:
+#     bash scripts/realcase/royal-fiesta.sh --host "${RF_VM_HOST:-etcito-vm}" --branch nmc/68-kong-dependencies-from-github-b2--m4-royal-fiesta-builds-from --out /root/nmc/evidence/68-m4/royal-fiesta-vm
+#   which writes /root/nmc/evidence/68-m4/royal-fiesta-vm/transcript-vm.txt.
+# Slow (cold cargo/wasm build): the local run is the programmatic card of .nmc/commands.json.
 set -u
+
+# Clean Linux PATH (the card execs this script with no shell setup): cargo first, then
+# the system dirs, then inherited entries without spaces and outside /mnt/ (keeps a
+# node/nvm install, drops the WSL Windows interop PATH). The raw $PATH is never appended.
+clean_path() {
+  local out="${CARGO_HOME:-$HOME/.cargo}/bin:/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  local e rest="${PATH-}:"
+  while [ -n "$rest" ]; do
+    e="${rest%%:*}"; rest="${rest#*:}"
+    case "$e" in ""|*" "*|/mnt/*) continue ;; esac
+    case ":$out:" in *":$e:"*) continue ;; esac
+    out="$out:$e"
+  done
+  printf '%s' "$out"
+}
+PATH=$(clean_path)
+export PATH
 
 DEFAULT_GAME=https://github.com/Etcito/royal-fiesta.git
 GAME=$DEFAULT_GAME
@@ -36,6 +57,12 @@ while [ $# -gt 0 ]; do
     *) echo "royal-fiesta: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+# The VM side (--_remote) never builds, so it does not need cargo.
+if [ -z "$REMOTE_DIR" ] && ! command -v cargo > /dev/null 2>&1; then
+  echo "royal-fiesta: cargo not found on PATH ($PATH)" >&2
+  exit 2
+fi
 
 # Replaces token values and token-shaped strings with ***. Tokens reach awk through
 # its environment only, never through argv.
@@ -178,8 +205,14 @@ mkdir -p "$OUT" || { echo "royal-fiesta: cannot create $OUT" >&2; exit 2; }
 OUT=$(cd "$OUT" && pwd)
 
 # Step 1: the kong binary (built headless when --kong is absent), made absolute.
+# --host builds the static musl binary, which runs on any Linux VM.
 resolve_kong() {
-  if [ -z "$KONG" ]; then
+  if [ -z "$KONG" ] && [ -n "$HOST" ]; then
+    echo "royal-fiesta: cargo build --release --no-default-features --target x86_64-unknown-linux-musl" >&2
+    ( cd "$ROOT" && cargo build --release --no-default-features --target x86_64-unknown-linux-musl ) >&2 \
+      || { echo "royal-fiesta: cargo build failed" >&2; exit 1; }
+    KONG="$ROOT/target/x86_64-unknown-linux-musl/release/kong"
+  elif [ -z "$KONG" ]; then
     echo "royal-fiesta: cargo build --release --no-default-features" >&2
     ( cd "$ROOT" && cargo build --release --no-default-features ) >&2 \
       || { echo "royal-fiesta: cargo build failed" >&2; exit 1; }
@@ -248,7 +281,15 @@ TX="$W/transcript.raw"
 {
   echo "# Royal Fiesta real case, $(date -u +%Y-%m-%dT%H:%M:%SZ), $(uname -sr)."
   echo "# Game: $GAME${BRANCH:+ (branch $BRANCH)}. Empty parent \$P from mktemp -d."
+  echo "# PATH=$PATH"
 } > "$TX"
+# Toolchain preflight (shows e.g. a missing wasm32-unknown-unknown target up front).
+step "$ROOT" "cargo --version" cargo --version
+command -v rustup > /dev/null 2>&1 \
+  && step "$ROOT" "rustup target list --installed" rustup target list --installed
+command -v node > /dev/null 2>&1 && step "$ROOT" "node --version" node --version
+command -v npm > /dev/null 2>&1 && step "$ROOT" "npm --version" npm --version
+: > "$W/wall.txt"  # timings.txt holds the real-case commands only
 
 run_case
 C="$P/royal-fiesta"
