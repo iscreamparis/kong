@@ -103,7 +103,6 @@ fn backcompat(store: &Path) {
 }
 
 #[test]
-#[ignore = "M2 proof: run by scripts/proof-m2.sh until the integration task enables it"]
 fn proof_m2() {
     let store_dir = tempfile::TempDir::new().unwrap();
     let store = store_dir.path();

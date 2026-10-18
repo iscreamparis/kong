@@ -21,6 +21,9 @@ done
 
 THREADS="${NMC_CPUS:-1}"
 
+echo "proof-m2: warming the cargo registry (cargo fetch; no-op when already warm)"
+if [ -f Cargo.lock ]; then cargo fetch --locked; else cargo fetch; fi
+
 # --include-ignored keeps this valid once the test's #[ignore] is removed.
 cargo test --offline --no-default-features --quiet proof_m2 -- \
   --include-ignored --nocapture --test-threads="$THREADS"
