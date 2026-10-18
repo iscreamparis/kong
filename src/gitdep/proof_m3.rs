@@ -1,10 +1,11 @@
 //! Milestone 3 proof: a git dependency's build step runs once per commit, a rerun is
-//! fully cached, a build failure is diagnosable, and no credential reaches disk.
+//! fully cached, a build failure is diagnosable, no credential reaches disk, and
+//! solidify / eject handle git dependencies.
 //! Run by `scripts/proof-m3.sh`; one fixture repository serves the checks.
 
 use std::path::{Path, PathBuf};
 
-use crate::config::GitPackageEntry;
+use crate::config::{GitPackageEntry, PackageEntry};
 use crate::gitdep::build::{run_build_with, BuildTools};
 use crate::node::git::fetch::{self, GitEnv};
 use crate::node::git::proof_support::{
@@ -35,9 +36,10 @@ fn options<'a>(
     PrepareOptions { update, force: false, git_env, builder: Some(builder), host: HostTriple::current() }
 }
 
-fn seeded_store() -> tempfile::TempDir {
+/// A temp store holding `is-fixture@1.0.0`, and that package's rules entry.
+fn seeded_store() -> (tempfile::TempDir, PackageEntry) {
     let store = tempfile::TempDir::new().unwrap();
-    seed_store_package(
+    let seeded = seed_store_package(
         store.path(),
         "is-fixture",
         "1.0.0",
@@ -46,7 +48,7 @@ fn seeded_store() -> tempfile::TempDir {
             ("index.js", "exports.name = 'is-fixture';\n"),
         ],
     );
-    store
+    (store, seeded)
 }
 
 /// A project whose package.json declares `@fx/core` from `url#v1.0.0` with a build step.
@@ -96,7 +98,13 @@ fn entry<'a>(entries: &'a [GitPackageEntry]) -> &'a GitPackageEntry {
     entries.iter().find(|e| e.name == "@fx/core").expect("@fx/core entry")
 }
 
-fn build_once(store: &Path, sources: &[spec::GitSource], tagged: &str) -> (Vec<GitPackageEntry>, PrepareReport) {
+/// The first `prepare_all`; `report` is false when only a later check needs its entries.
+fn build_once(
+    store: &Path,
+    sources: &[spec::GitSource],
+    tagged: &str,
+    report_check: bool,
+) -> (Vec<GitPackageEntry>, PrepareReport) {
     let builder = build_with_defaults;
     let res = prepare_all(store, sources, &[], &options(false, GitEnv::default(), &builder));
     let (entries, report) = match res {
@@ -113,10 +121,13 @@ fn build_once(store: &Path, sources: &[spec::GitSource], tagged: &str) -> (Vec<G
     let out = std::fs::read_to_string(dir.join("src/packages/core/pkg/out.js")).unwrap_or_default();
     let out_ok = out.contains(tagged) && is_hex40(tagged);
     let tracked = tracked_changes(&dir.join("src"));
+    if !report_check {
+        return (entries, report);
+    }
     check(
         "build_once",
         format!(
-            "marker={} log={} out={} tracked_changes={} clone_seconds={:.1} build_seconds={:.1}",
+            "marker={} log={} out={} tracked_changes={} clone_seconds={:.3} build_seconds={:.3}",
             marker as u8, log as u8, out_ok as u8, tracked, report.clone_seconds, report.build_seconds
         ),
         "marker, log and pkg/out.js (with the commit) present, tracked changes=0",
@@ -205,7 +216,7 @@ fn build_failure_error() {
 fn no_secret_written(fx: &GitFixture) {
     let env = crate::gitdep::auth::git_env_from(&|k| (k == "KONG_GIT_TOKEN").then(|| SENTINEL.to_string()));
     let has_secrets = !env.secrets.is_empty();
-    let store = seeded_store();
+    let (store, _) = seeded_store();
     let (project, sources) = project_for(&fx.url);
     let builder = build_with_defaults;
     let res = prepare_all(store.path(), &sources, &[], &options(false, env, &builder));
@@ -218,19 +229,7 @@ fn no_secret_written(fx: &GitFixture) {
     };
     if let Ok((entries, _)) = &res {
         let section = crate::config::NodeSection { packages: Vec::new(), local: Vec::new(), git: entries.clone() };
-        let rules = crate::config::KongRules {
-            version: 1,
-            project: "proof-m3".into(),
-            generated: "proof".into(),
-            runtimes: None,
-            python: None,
-            node: Some(section),
-            rust: None,
-            brew: None,
-            scripts: Default::default(),
-            services: Vec::new(),
-        };
-        crate::config::write_rules(&rules, &project.path().join("kong.rules")).unwrap();
+        crate::config::write_rules(&rules_with(section), &project.path().join("kong.rules")).unwrap();
     }
     let mut count = err_count + count_in_tree(project.path(), SENTINEL);
     for d in &commit_dirs {
@@ -244,17 +243,84 @@ fn no_secret_written(fx: &GitFixture) {
     );
 }
 
+/// Project rules holding only `node`, as `kong rules` would write them.
+fn rules_with(node: crate::config::NodeSection) -> crate::config::KongRules {
+    crate::config::KongRules {
+        version: 1,
+        project: "proof-m3".into(),
+        generated: "proof".into(),
+        runtimes: None,
+        python: None,
+        node: Some(node),
+        rust: None,
+        brew: None,
+        scripts: Default::default(),
+        services: Vec::new(),
+    }
+}
+
+/// Solidify the project's node_modules from the store, then eject it alone: the
+/// commit dir only this project uses must go. Runs last, since eject deletes it.
+fn solidify_eject(
+    store: &Path,
+    project: &Path,
+    sources: &[spec::GitSource],
+    first: &[GitPackageEntry],
+    seeded: &PackageEntry,
+) {
+    let section = crate::config::NodeSection {
+        packages: vec![seeded.clone()],
+        local: Vec::new(),
+        git: first.to_vec(),
+    };
+    let nm = project.join("node_modules");
+    let solid = crate::migrate::solidify_node(&nm, project, &section, store);
+    let core = nm.join("@fx/core");
+    let real_dir = solid.is_ok() && core.is_dir() && !core.is_symlink();
+    let out = core.join("pkg/out.js").is_file();
+    let inner_nm = core.join("node_modules/is-fixture/package.json").is_file();
+
+    crate::config::write_rules(&rules_with(section), &project.join("kong.rules")).unwrap();
+    let index = crate::migrate::build_dep_index(&[("proj".to_string(), project.to_path_buf())]);
+    let rules = crate::config::read_rules(&project.join("kong.rules")).unwrap();
+    let paths = crate::migrate::exclusive_store_paths(&rules, &index);
+    let removed = crate::migrate::remove_store_entries(store, &paths);
+    let commit_dir = fetch::commit_dir(store, &sources[0].repo, &entry(first).commit);
+    let dir_removed = removed.is_ok() && !commit_dir.exists();
+    let mut measured = format!(
+        "real_dir={} out={} inner_nm={} commit_dir_removed={}",
+        real_dir as u8, out as u8, inner_nm as u8, dir_removed as u8
+    );
+    if let Err(e) = &solid {
+        measured.push_str(&format!(" solidify_error={e:#}"));
+    }
+    if let Err(e) = &removed {
+        measured.push_str(&format!(" eject_error={e:#}"));
+    }
+    check(
+        "solidify_eject",
+        measured,
+        "node_modules/@fx/core real dir with pkg/out.js and node_modules/is-fixture; exclusive commit dir removed",
+        real_dir && out && inner_nm && dir_removed,
+    );
+}
+
 #[test]
-#[ignore = "enabled when gitdep is implemented"]
 fn proof_m3() {
-    let wants = ["build_once", "rerun_cached_and_update", "build_failure_error", "no_secret_written"]
-        .map(selected);
-    let [want_build, want_rerun, want_fail, want_secret] = wants;
+    let wants = [
+        "build_once",
+        "rerun_cached_and_update",
+        "build_failure_error",
+        "no_secret_written",
+        "solidify_eject",
+    ]
+    .map(selected);
+    let [want_build, want_rerun, want_fail, want_secret, want_solid] = wants;
 
     if want_fail {
         build_failure_error();
     }
-    if !(want_build || want_rerun || want_secret) {
+    if !(want_build || want_rerun || want_secret || want_solid) {
         return;
     }
 
@@ -267,13 +333,15 @@ fn proof_m3() {
     if want_secret {
         no_secret_written(&fx);
     }
-    if want_build || want_rerun {
-        let store = seeded_store();
-        let (_project, sources) = project_for(&fx.url);
-        let (entries, _) = build_once(store.path(), &sources, &tagged);
+    if want_build || want_rerun || want_solid {
+        let (store, seeded) = seeded_store();
+        let (project, sources) = project_for(&fx.url);
+        let (entries, _) = build_once(store.path(), &sources, &tagged, want_build);
         if want_rerun {
             rerun_cached_and_update(store.path(), &sources, &entries, &fx);
         }
+        if want_solid {
+            solidify_eject(store.path(), project.path(), &sources, &entries, &seeded);
+        }
     }
-    // solidify_eject: added once migrate-git lands
 }

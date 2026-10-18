@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Milestone 3 proof: a git dependency's build step runs once per commit and is cached,
-# a build failure is diagnosable, and no credential is written to disk. The checks live
+# a build failure is diagnosable, no credential is written to disk, and solidify/eject
+# handle git dependencies. Clone and build seconds are printed as values. The checks live
 # in src/gitdep/proof_m3.rs (cargo test, no network).
 # Usage (from the repository root): bash scripts/proof-m3.sh [--only P] [--quick|--full]
 # --full also runs the node:: and gitdep:: unit-test modules.
@@ -24,9 +25,18 @@ THREADS="${NMC_CPUS:-1}"
 echo "proof-m3: warming the cargo registry (cargo fetch; no-op when already warm)"
 if [ -f Cargo.lock ]; then cargo fetch --locked; else cargo fetch; fi
 
-# --include-ignored keeps this valid once the test's #[ignore] is removed.
+# --include-ignored is harmless now that the test's #[ignore] is removed.
+OUT="$(mktemp)"
+trap 'rm -f "$OUT"' EXIT
 cargo test --offline --no-default-features --quiet proof_m3 -- \
-  --include-ignored --nocapture --test-threads="$THREADS"
+  --include-ignored --nocapture --test-threads="$THREADS" 2>&1 | tee "$OUT"
+
+# Timings are values, not thresholds: taken from the build_once check line.
+if grep -q '^build_once: .*clone_seconds=' "$OUT"; then
+  CLONE_S="$(sed -n 's/^build_once: .*clone_seconds=\([0-9.]*\).*/\1/p' "$OUT" | head -n1)"
+  BUILD_S="$(sed -n 's/^build_once: .*build_seconds=\([0-9.]*\).*/\1/p' "$OUT" | head -n1)"
+  echo "proof-m3: clone_seconds=${CLONE_S:-?} build_seconds=${BUILD_S:-?}"
+fi
 
 if [ "$FULL" -eq 1 ]; then
   cargo test --offline --no-default-features --quiet node:: -- --test-threads="$THREADS"
