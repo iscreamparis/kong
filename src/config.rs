@@ -175,6 +175,13 @@ pub fn resolve_local_path(project_dir: &Path, declared: &str) -> std::path::Path
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RustSection {
     pub packages: Vec<PackageEntry>,
+    /// Workspace members of the Cargo.lock (packages without a `source`),
+    /// sorted: with `lock_hash`, a project identity stable across worktrees.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace: Vec<String>,
+    /// sha256 of the Cargo.lock with CRLF normalised to LF.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -643,7 +650,7 @@ pub fn generate_rules_with_options(project_dir: &Path, opts: &RulesOptions) -> R
                 packages.push(PackageEntry {
                     name: dep.name.clone(),
                     version: dep.version.clone(),
-                    hash: None,
+                    hash: dep.checksum.clone(),
                     store_path,
                     source_url: None,
                     path: None,
@@ -651,7 +658,10 @@ pub fn generate_rules_with_options(project_dir: &Path, opts: &RulesOptions) -> R
             }
         }
         let entry = RuntimeEntry { version: runtime.version, store_path: runtime.store_path };
-        (Some(entry), Some(RustSection { packages }))
+        let cargo_lock = project_dir.join("Cargo.lock");
+        let workspace = crate::rust_eco::parser::workspace_members(&cargo_lock)?;
+        let lock_hash = Some(crate::rust_eco::parser::lock_hash(&cargo_lock)?);
+        (Some(entry), Some(RustSection { packages, workspace, lock_hash }))
     } else {
         (None, None)
     };
@@ -931,6 +941,30 @@ pub fn collect_scripts(project_dir: &Path) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rust_section_without_new_data_serializes_as_before() {
+        let section = RustSection {
+            packages: vec![PackageEntry {
+                name: "anyhow".to_string(),
+                version: "1.0.86".to_string(),
+                hash: None,
+                store_path: "rust/crates/anyhow-1.0.86".to_string(),
+                source_url: None,
+                path: None,
+            }],
+            workspace: Vec::new(),
+            lock_hash: None,
+        };
+        let json = serde_json::to_string(&section).unwrap();
+        assert_eq!(
+            json,
+            r#"{"packages":[{"name":"anyhow","version":"1.0.86","store_path":"rust/crates/anyhow-1.0.86"}]}"#
+        );
+        assert!(!json.contains("workspace") && !json.contains("lock_hash"));
+        let back: RustSection = serde_json::from_str(&json).unwrap();
+        assert!(back.workspace.is_empty() && back.lock_hash.is_none());
+    }
 
     #[test]
     fn round_trip_rules() {
