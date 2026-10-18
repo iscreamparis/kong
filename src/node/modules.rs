@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use tracing::{debug, info};
 
-use crate::config::{LocalPackageEntry, NodeSection, PackageEntry};
+use crate::config::{GitPackageEntry, LocalPackageEntry, NodeSection, PackageEntry};
 use crate::link;
 
 /// Build node_modules from the store using deep hard links.
@@ -34,6 +34,8 @@ pub fn build_node_modules(
     std::fs::create_dir_all(&nm)?;
 
     link_local_packages(&nm, project_dir, &node.local)?;
+    link_git_packages(&nm, &node.git, store_root)?;
+    let git_names: HashSet<&str> = node.git.iter().map(|g| g.name.as_str()).collect();
 
     // Top-level entries FIRST (no `path`), whatever the order of the list: the
     // hoisted `node_modules/<name>` must be the lockfile's own top-level version,
@@ -75,6 +77,13 @@ pub fn build_node_modules(
             }
             None => nm.join(&pkg.name),
         };
+        // A git dependency owns its `node_modules/<name>` link: the parser never
+        // records a registry entry under that name, but an edited kong.rules
+        // must not replace the link with a registry copy.
+        if pkg.path.is_none() && git_names.contains(pkg.name.as_str()) {
+            debug!(pkg = %pkg.name, "Git dependency of the same name, skipping registry entry");
+            continue;
+        }
         // Two entries for one location (old kong.rules with duplicate top-level
         // names): the first wins, as before — never flip-flop between them.
         if !placed.insert(dest.clone()) {
@@ -117,12 +126,13 @@ pub fn build_node_modules(
     let bin_dir = nm.join(".bin");
     std::fs::create_dir_all(&bin_dir)?;
 
-    // Bins of registry AND local packages: npm links both.
+    // Bins of registry, local AND git packages: npm links all of them.
     let bin_owners = node
         .packages
         .iter()
         .map(|p| p.name.as_str())
-        .chain(node.local.iter().map(|l| l.name.as_str()));
+        .chain(node.local.iter().map(|l| l.name.as_str()))
+        .chain(node.git.iter().map(|g| g.name.as_str()));
     for pkg_name in bin_owners {
         let top_level = nm.join(pkg_name);
         if !top_level.exists() {
@@ -306,6 +316,54 @@ pub fn link_local_packages(
             )
         })?;
         info!(pkg = %lp.name, target = %target.display(), "Linked local package");
+    }
+    Ok(())
+}
+
+/// Link each git dependency at `node_modules/<name>` → its package directory
+/// inside the store checkout (`git_link_target`).
+///
+/// The link goes to the REAL checkout path, not a copy: Node and Vite resolve
+/// symlinks, so `require()` from the package walks up into the checkout's own
+/// `node_modules` (installed by `kong rules`). Same idempotent rules as
+/// `link_local_packages`: a correct link is kept, a stale one replaced, a real
+/// env directory removed; the checkout itself is never written to.
+pub fn link_git_packages(nm: &Path, git: &[GitPackageEntry], store_root: &Path) -> Result<()> {
+    for g in git {
+        crate::node::git::check_prepared(store_root, g)?;
+        let target = crate::node::git::git_link_target(store_root, g);
+        let dst = nm.join(&g.name);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        if is_dir_link(&dst) {
+            if link_points_to(&dst, &target) {
+                debug!(pkg = %g.name, "Git link already correct");
+                continue;
+            }
+            remove_dir_link(&dst)?;
+        } else if dst.exists() {
+            // The env's own tree (a previous registry or solidified install):
+            // hard links only, the store keeps its copy.
+            link::remove_dir_all_robust(&dst).with_context(|| {
+                format!(
+                    "failed to replace {} with a link to git dependency '{}'",
+                    dst.display(),
+                    g.name
+                )
+            })?;
+        }
+
+        link::link_dir(&target, &dst).with_context(|| {
+            format!(
+                "failed to link git dependency '{}': {} -> {}",
+                g.name,
+                dst.display(),
+                target.display()
+            )
+        })?;
+        info!(pkg = %g.name, commit = %&g.commit[..g.commit.len().min(12)], target = %target.display(), "Linked git dependency");
     }
     Ok(())
 }
@@ -706,5 +764,167 @@ mod tests {
             .path()
             .join("node/libs/lru-cache-11.5.2/package/index.js")
             .is_file());
+    }
+
+    // ── git dependencies ───────────────────────────────────────────────────
+
+    const GIT_STORE_PATH: &str = "node/git/r-1234abcd/0123456789ab";
+
+    fn git_entry(lock_dir: Option<&str>) -> GitPackageEntry {
+        GitPackageEntry {
+            name: "@fx/core".into(),
+            version: "1.0.0".into(),
+            source: "git+file:///tmp/r#v1.0.0".into(),
+            repo: "file:///tmp/r".into(),
+            reference: Some("v1.0.0".into()),
+            commit: "0123456789abcdef0123456789abcdef01234567".into(),
+            path: "packages/core".into(),
+            build: None,
+            rust_targets: vec![],
+            declared_by: "package.json".into(),
+            store_path: GIT_STORE_PATH.into(),
+            lock_dir: lock_dir.map(Into::into),
+            packages: vec![],
+            local: vec![],
+        }
+    }
+
+    /// A hand-made store commit dir: checkout with `src/packages/core` (with a
+    /// bin), `.kong-cloned`, and `.kong-installed` when `installed`.
+    fn git_store(installed: bool) -> (tempfile::TempDir, std::path::PathBuf) {
+        let store = tempfile::TempDir::new().unwrap();
+        let commit_dir = store.path().join(GIT_STORE_PATH);
+        let pkg = commit_dir.join("src/packages/core");
+        std::fs::create_dir_all(pkg.join("bin")).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{"name":"@fx/core","version":"1.0.0","bin":{"fx-core":"bin/cli.js"}}"#,
+        )
+        .unwrap();
+        std::fs::write(pkg.join("bin/cli.js"), "console.log(1)").unwrap();
+        std::fs::write(pkg.join("index.js"), "module.exports=1").unwrap();
+        std::fs::write(commit_dir.join("src/README.md"), "repo").unwrap();
+        std::fs::write(commit_dir.join(".kong-cloned"), "{}").unwrap();
+        if installed {
+            std::fs::write(commit_dir.join(".kong-installed"), "{}").unwrap();
+        }
+        (store, pkg)
+    }
+
+    fn git_node(lock_dir: Option<&str>) -> NodeSection {
+        NodeSection {
+            packages: vec![],
+            local: vec![],
+            git: vec![git_entry(lock_dir)],
+        }
+    }
+
+    fn file_count(root: &Path) -> usize {
+        walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .count()
+    }
+
+    #[test]
+    fn git_link_points_at_store_checkout_subdir() {
+        let (store, pkg) = git_store(true);
+        let env = tempfile::TempDir::new().unwrap();
+        build_node_modules(env.path(), env.path(), &git_node(Some("")), store.path()).unwrap();
+        let dst = env.path().join("node_modules/@fx/core");
+        assert!(is_dir_link(&dst));
+        assert_eq!(
+            std::fs::canonicalize(&dst).unwrap(),
+            std::fs::canonicalize(&pkg).unwrap()
+        );
+        #[cfg(unix)]
+        assert!(std::fs::symlink_metadata(env.path().join("node_modules/.bin/fx-core")).is_ok());
+        #[cfg(windows)]
+        assert!(env.path().join("node_modules/.bin/fx-core.cmd").exists());
+    }
+
+    #[test]
+    fn git_link_rerun_is_a_noop() {
+        let (store, _pkg) = git_store(true);
+        let env = tempfile::TempDir::new().unwrap();
+        let node = git_node(Some(""));
+        build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
+        let first = tree(env.path());
+        let store_before = tree(store.path());
+        build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
+        assert_eq!(first, tree(env.path()));
+        assert_eq!(store_before, tree(store.path()));
+    }
+
+    #[test]
+    fn git_link_replaces_stale_link_and_real_dir() {
+        let (store, pkg) = git_store(true);
+        let env = tempfile::TempDir::new().unwrap();
+        let dst = env.path().join("node_modules/@fx/core");
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+
+        // Stale link to another directory: replaced, its target untouched.
+        let other = env.path().join("elsewhere");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("keep.txt"), "x").unwrap();
+        link::link_dir(&other, &dst).unwrap();
+        build_node_modules(env.path(), env.path(), &git_node(None), store.path()).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(&dst).unwrap(),
+            std::fs::canonicalize(&pkg).unwrap()
+        );
+        assert!(other.join("keep.txt").exists());
+
+        // A real env directory (old registry install): replaced, store untouched.
+        remove_dir_link(&dst).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(dst.join("package.json"), r#"{"version":"0.9.0"}"#).unwrap();
+        let store_before = tree(store.path());
+        build_node_modules(env.path(), env.path(), &git_node(None), store.path()).unwrap();
+        assert!(is_dir_link(&dst));
+        assert_eq!(
+            std::fs::canonicalize(&dst).unwrap(),
+            std::fs::canonicalize(&pkg).unwrap()
+        );
+        assert_eq!(store_before, tree(store.path()));
+    }
+
+    #[test]
+    fn git_link_missing_install_marker_errors_with_hint() {
+        let (store, _pkg) = git_store(false);
+        let env = tempfile::TempDir::new().unwrap();
+        let err = build_node_modules(env.path(), env.path(), &git_node(Some("")), store.path())
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("@fx/core"), "{msg}");
+        assert!(msg.contains("run `kong rules`"), "{msg}");
+        assert!(!env.path().join("node_modules/@fx/core").exists());
+    }
+
+    #[test]
+    fn git_link_registry_entry_of_same_name_is_skipped() {
+        let (store, pkg) = git_store(true);
+        let env = tempfile::TempDir::new().unwrap();
+        let mut node = git_node(None);
+        node.packages = vec![store_pkg(store.path(), "@fx/core", "0.5.0")];
+        build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(env.path().join("node_modules/@fx/core")).unwrap(),
+            std::fs::canonicalize(&pkg).unwrap()
+        );
+    }
+
+    #[test]
+    fn clean_environments_never_deletes_through_a_git_link() {
+        let (store, _pkg) = git_store(true);
+        let env = tempfile::TempDir::new().unwrap();
+        let checkout = store.path().join(GIT_STORE_PATH);
+        let before = file_count(&checkout);
+        build_node_modules(env.path(), env.path(), &git_node(Some("")), store.path()).unwrap();
+        link::clean_environments(env.path(), false).unwrap();
+        assert!(!env.path().join("node_modules").exists());
+        assert_eq!(before, file_count(&checkout));
+        assert!(checkout.join("src/packages/core/package.json").is_file());
     }
 }
