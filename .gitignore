@@ -1,6 +1,6 @@
 # Rust
 /target/
-Cargo.lock
+/.rust-toolchain/
 # build/ holds generated installers (.exe) — ignore those, but KEEP the NSIS
 # source script tracked (same pattern as .github/* + !.github/workflows below).
 build/*
