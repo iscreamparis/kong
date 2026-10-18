@@ -357,8 +357,8 @@ cargo build --offline                       # and cargo test --offline
   `<tmp>/kong-cache`, chosen automatically with a warning. Without network, `kong rules` reuses the newest
   Rust toolchain already in the store.
 - **Limits.** crates.io dependencies only (git/path dependencies in `Cargo.lock` are not vendored).
-  `CARGO_HOME` is per env, so `~/.cargo/config.toml` is not read. Timing evidence:
-  `docs/measurements/cargo-warm/timings.txt`, written by `scripts/measure/cargo-warm.sh`.
+  The wrapper's `--config` flag overrides any `~/.cargo/config.toml` or parent-directory config, so a
+  sandbox config that replaces crates-io with another registry does not break offline builds.
 
 ---
 
