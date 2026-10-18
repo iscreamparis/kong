@@ -684,7 +684,9 @@ fn pathdiff_relative(link: &Path, target: &Path) -> Option<PathBuf> {
 }
 
 /// Create a real (non-linked) node_modules by copying packages from the store.
-fn solidify_node(
+///
+/// `pub(crate)` so tests and proofs can pass an explicit store root.
+pub(crate) fn solidify_node(
     nm_dir: &Path,
     project_dir: &Path,
     node: &config::NodeSection,
@@ -720,6 +722,81 @@ fn solidify_node(
         debug!(pkg = %pkg.name, "Copied into node_modules");
     }
 
+    // Git dependencies become real directories: the checkout subdir (with its
+    // build outputs, without `.git`) plus a copy of the dependency's own tree.
+    // The store is only read, so other projects keep using the same commit dir.
+    for entry in &node.git {
+        solidify_git_entry(nm_dir, entry, store_root)?;
+    }
+
+    Ok(())
+}
+
+/// Copy one git dependency into `nm/<name>` as real files. The dependency's
+/// own `node_modules` in the store holds hard links shared with `node/libs`,
+/// so it is rebuilt from the store packages instead of copied verbatim
+/// (which would also drag local-package links pointing into the store).
+fn solidify_git_entry(
+    nm_dir: &Path,
+    entry: &config::GitPackageEntry,
+    store_root: &Path,
+) -> Result<()> {
+    let dst = nm_dir.join(&entry.name);
+    remove_link_or_dir(&dst)?;
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let src = crate::node::git::git_link_target(store_root, entry);
+    if !src.is_dir() {
+        warn!(pkg = %entry.name, path = %src.display(), "Git checkout missing in store, skipping");
+        return Ok(());
+    }
+    copy_dir_excluding(&src, &dst, &[".git", "node_modules"])?;
+
+    for pkg in &entry.packages {
+        let pkg_src = store_root.join(&pkg.store_path);
+        if !pkg_src.exists() {
+            warn!(pkg = %pkg.name, git = %entry.name, "Store path missing, skipping");
+            continue;
+        }
+        let content_dir = crate::node::modules::package_content_root(&pkg_src);
+        let pkg_dst = match &pkg.path {
+            None => dst.join("node_modules").join(&pkg.name),
+            Some(nested) => dst.join(nested),
+        };
+        if let Some(parent) = pkg_dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        copy_dir_recursive(&content_dir, &pkg_dst)?;
+    }
+
+    // Own workspace links: copied (not linked) because their targets live
+    // inside the store checkout this project must stop depending on.
+    let lock_root = {
+        let mut root = store_root.join(&entry.store_path).join("src");
+        if let Some(lock_dir) = &entry.lock_dir {
+            for part in lock_dir.split('/').filter(|part| !part.is_empty()) {
+                root.push(part);
+            }
+        }
+        root
+    };
+    for local in entry.local.iter().filter(|l| l.name != entry.name) {
+        let local_src = local.resolve(&lock_root);
+        if !local_src.is_dir() {
+            warn!(pkg = %local.name, git = %entry.name, "Local package missing in store, skipping");
+            continue;
+        }
+        let local_dst = dst.join("node_modules").join(&local.name);
+        remove_link_or_dir(&local_dst)?;
+        if let Some(parent) = local_dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        copy_dir_excluding(&local_src, &local_dst, &["node_modules"])?;
+    }
+
+    debug!(pkg = %entry.name, "Copied git dependency into node_modules");
     Ok(())
 }
 
@@ -992,6 +1069,28 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
         let rel = entry.path().strip_prefix(src)?;
         let dst_path = dst.join(rel);
         copy_entry(entry.path(), &dst_path)?;
+    }
+    Ok(())
+}
+
+/// Like `copy_dir_recursive`, but skips every entry that has a path component
+/// (relative to `src`) equal to one of `excluded` — e.g. a checkout's `.git`
+/// and its store-built `node_modules`, at any depth.
+fn copy_dir_excluding(src: &Path, dst: &Path, excluded: &[&str]) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    let walker = WalkDir::new(src).min_depth(1).into_iter().filter_entry(|e| {
+        e.path()
+            .strip_prefix(src)
+            .map(|rel| {
+                !rel.components()
+                    .any(|c| excluded.iter().any(|x| c.as_os_str() == *x))
+            })
+            .unwrap_or(true)
+    });
+    for entry in walker {
+        let entry = entry?;
+        let rel = entry.path().strip_prefix(src)?;
+        copy_entry(entry.path(), &dst.join(rel))?;
     }
     Ok(())
 }
@@ -1363,6 +1462,81 @@ mod tests {
             // The dangling link was either recreated (as a still-dangling link)
             // or cleanly skipped; either way the copy did not error above.
             // Nothing more to assert beyond the copy having succeeded.
+        }
+    }
+
+    /// Solidify copies a git dependency as a real directory holding the
+    /// checkout's build output and its own registry packages, without `.git`
+    /// or the store-built `node_modules`, and never writes to the store.
+    #[test]
+    fn solidify_copies_git_dep_as_real_dir() {
+        let store = tempfile::TempDir::new().unwrap();
+        let project = tempfile::TempDir::new().unwrap();
+        let s = store.path();
+
+        let commit_dir = s.join("node/git/x-1/abcdef012345");
+        let core = commit_dir.join("src/packages/core");
+        std::fs::create_dir_all(core.join("pkg")).unwrap();
+        std::fs::create_dir_all(commit_dir.join("src/.git")).unwrap();
+        std::fs::create_dir_all(core.join("node_modules/is-fixture")).unwrap();
+        let files = [
+            (core.join("package.json"), r#"{"name":"@fx/core","version":"0.1.0"}"#),
+            (core.join("pkg/out.js"), "module.exports = 1;\n"),
+            (core.join("node_modules/is-fixture/index.js"), "store-built\n"),
+            (commit_dir.join("src/.git/HEAD"), "ref: refs/heads/main\n"),
+            (core.join(".git/HEAD"), "ref: refs/heads/nested\n"),
+            (s.join("node/libs/is-fixture-1.0.0/package/index.js"), "module.exports = true;\n"),
+        ];
+        for (path, content) in &files {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        }
+
+        let entry = config::GitPackageEntry {
+            name: "@fx/core".into(),
+            version: "0.1.0".into(),
+            source: "git+file:///x".into(),
+            repo: "file:///x".into(),
+            reference: None,
+            commit: "abcdef0123456789abcdef0123456789abcdef01".into(),
+            path: "packages/core".into(),
+            build: None,
+            rust_targets: Vec::new(),
+            declared_by: "package.json".into(),
+            store_path: "node/git/x-1/abcdef012345".into(),
+            lock_dir: Some("packages/core".into()),
+            packages: vec![PackageEntry {
+                name: "is-fixture".into(),
+                version: "1.0.0".into(),
+                hash: None,
+                store_path: "node/libs/is-fixture-1.0.0".into(),
+                source_url: None,
+                path: None,
+            }],
+            local: Vec::new(),
+        };
+        let node = NodeSection { packages: Vec::new(), local: Vec::new(), git: vec![entry] };
+
+        let nm = project.path().join("node_modules");
+        solidify_node(&nm, project.path(), &node, s).unwrap();
+
+        let dep = nm.join("@fx/core");
+        let meta = std::fs::symlink_metadata(&dep).unwrap();
+        assert!(meta.is_dir() && !meta.file_type().is_symlink(), "must be a real dir");
+        #[cfg(windows)]
+        assert!(!junction::exists(&dep).unwrap_or(false), "must not be a junction");
+        assert!(dep.join("pkg/out.js").is_file());
+        assert!(dep.join("package.json").is_file());
+        assert_eq!(
+            std::fs::read_to_string(dep.join("node_modules/is-fixture/index.js")).unwrap(),
+            "module.exports = true;\n",
+            "inner package comes from node/libs, not the store-built tree"
+        );
+        assert!(!dep.join(".git").exists());
+        assert!(!project.path().join("node_modules/.git").exists());
+
+        for (path, content) in &files {
+            assert_eq!(&std::fs::read_to_string(path).unwrap(), content, "{}", path.display());
         }
     }
 }
