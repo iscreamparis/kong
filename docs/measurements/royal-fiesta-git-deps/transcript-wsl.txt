@@ -1,0 +1,220 @@
+# Royal Fiesta real case, 2026-10-18T17:56:52Z, Linux 6.6.87.2-microsoft-standard-WSL2.
+# Game: /root/nmc/repos/royal-fiesta (branch nmc/68-kong-dependencies-from-github-b2--m4-royal-fiesta-builds-from). Empty parent $P from mktemp -d.
+# PATH=/root/.cargo/bin:/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/sbin:/usr/games:/usr/local/games:/usr/lib/wsl/lib
+$ cargo --version
+cargo 1.96.0 (30a34c682 2026-05-25)
+exit=0
+$ rustup target list --installed
+wasm32-unknown-unknown
+x86_64-unknown-linux-gnu
+x86_64-unknown-linux-musl
+exit=0
+$ git clone --branch nmc/68-kong-dependencies-from-github-b2--m4-royal-fiesta-builds-from /root/nmc/repos/royal-fiesta royal-fiesta
+Cloning into 'royal-fiesta'...
+done.
+exit=0
+$ ls -A /tmp/tmp.7O6Oxxj09T
+royal-fiesta
+exit=0
+siblings=0
+$ git rev-parse HEAD
+680987228e6c4286f3e0af0341c7a69eee2c2193
+exit=0
+# KONG_STORE=$P/store (empty: cold clone and build)
+$ kong --version
+kong 0.8.7
+exit=0
+$ kong rules
+2026-10-18T17:56:53.060077Z  INFO Generating kong.rules path=/tmp/tmp.7O6Oxxj09T/royal-fiesta
+2026-10-18T17:56:53.060882Z  INFO Filtered out platform-incompatible optional Node packages skipped=33 host_os=linux host_cpu=x64 host_libc=Some("glibc")
+2026-10-18T17:56:53.060902Z  INFO Found Node dependencies — ensuring runtime
+2026-10-18T17:56:53.153382Z  INFO Downloading Node.js runtime version=24.22.0
+2026-10-18T17:56:53.153405Z  INFO Downloading Node.js runtime archive url=https://nodejs.org/dist/v24.22.0/node-v24.22.0-linux-x64.tar.gz
+2026-10-18T17:56:56.240402Z  INFO Downloaded path=/tmp/.tmpfIwfCf/node-v24.22.0-linux-x64.tar.gz size=58256361
+2026-10-18T17:56:56.264945Z  INFO Downloaded Node.js runtime size=58256361
+2026-10-18T17:56:57.075405Z  INFO tar.gz extracted (strip-1) dest=/tmp/tmp.7O6Oxxj09T/store/node/runtime/24.22.0
+2026-10-18T17:56:57.075424Z  INFO Node.js runtime extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/runtime/24.22.0
+2026-10-18T17:56:57.094772Z  INFO Node.js runtime ready version=24.22.0 exe=/tmp/tmp.7O6Oxxj09T/store/node/runtime/24.22.0/bin/node
+2026-10-18T17:56:57.094793Z  INFO Processing Node packages count=27 version=24.22.0
+2026-10-18T17:56:57.351415Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/@node-datachannel/linux-x64-gnu/-/linux-x64-gnu-0.33.4.tgz
+2026-10-18T17:56:57.823585Z  INFO Downloaded path=/tmp/.tmpjhfYO3/linux-x64-gnu-0.33.4.tgz size=3486574
+2026-10-18T17:56:57.859998Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/@node-datachannel+linux-x64-gnu-0.33.4
+2026-10-18T17:56:58.086179Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/@oxc-project/types/-/types-0.154.0.tgz
+2026-10-18T17:56:58.148182Z  INFO Downloaded path=/tmp/.tmp94XTNF/types-0.154.0.tgz size=7628
+2026-10-18T17:56:58.148901Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/@oxc-project+types-0.154.0
+2026-10-18T17:56:58.393219Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.2.14.tgz
+2026-10-18T17:56:59.017152Z  INFO Downloaded path=/tmp/.tmpjomuTw/binding-linux-x64-gnu-1.2.14.tgz size=8272395
+2026-10-18T17:56:59.106538Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/@rolldown+binding-linux-x64-gnu-1.2.14
+2026-10-18T17:56:59.352440Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/@rolldown/pluginutils/-/pluginutils-1.0.1.tgz
+2026-10-18T17:56:59.476629Z  INFO Downloaded path=/tmp/.tmp8Oyfku/pluginutils-1.0.1.tgz size=6681
+2026-10-18T17:56:59.477492Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/@rolldown+pluginutils-1.0.1
+2026-10-18T17:56:59.477599Z  INFO Local Node package (linked, not stored) pkg=@royal-fiesta/game path=packages/game
+2026-10-18T17:56:59.477622Z  INFO Local Node package (linked, not stored) pkg=@royal-fiesta/headless path=apps/headless
+2026-10-18T17:56:59.477651Z  INFO Local Node package (linked, not stored) pkg=@royal-fiesta/sim path=packages/sim
+2026-10-18T17:56:59.477683Z  INFO Local Node package (linked, not stored) pkg=@royal-fiesta/web path=apps/web
+2026-10-18T17:56:59.714276Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/@types/node/-/node-24.19.2.tgz
+2026-10-18T17:56:59.844707Z  INFO Downloaded path=/tmp/.tmp9L54wY/node-24.19.2.tgz size=474850
+2026-10-18T17:56:59.854253Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/@types+node-24.19.2
+2026-10-18T17:56:59.897384Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz
+2026-10-18T17:56:59.949817Z  INFO Downloaded path=/tmp/.tmp7S1JoK/detect-libc-2.1.2.tgz size=7776
+2026-10-18T17:56:59.950671Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/detect-libc-2.1.2
+2026-10-18T17:56:59.994354Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz
+2026-10-18T17:57:00.047082Z  INFO Downloaded path=/tmp/.tmpycPx73/fdir-6.5.0.tgz size=9742
+2026-10-18T17:57:00.047886Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/fdir-6.5.0
+2026-10-18T17:57:00.273815Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz
+2026-10-18T17:57:00.334500Z  INFO Downloaded path=/tmp/.tmpEPUyxe/lightningcss-1.33.0.tgz size=87655
+2026-10-18T17:57:00.336805Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/lightningcss-1.33.0
+2026-10-18T17:57:00.544483Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.33.0.tgz
+2026-10-18T17:57:00.803079Z  INFO Downloaded path=/tmp/.tmpDs5o2L/lightningcss-linux-x64-gnu-1.33.0.tgz size=3855795
+2026-10-18T17:57:00.846764Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/lightningcss-linux-x64-gnu-1.33.0
+2026-10-18T17:57:01.072983Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz
+2026-10-18T17:57:01.119335Z  INFO Downloaded path=/tmp/.tmpksq9FY/nanoid-3.3.20.tgz size=5721
+2026-10-18T17:57:01.120489Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/nanoid-3.3.20
+2026-10-18T17:57:01.354704Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/node-datachannel/-/node-datachannel-0.33.4.tgz
+2026-10-18T17:57:01.408124Z  INFO Downloaded path=/tmp/.tmpwt9J63/node-datachannel-0.33.4.tgz size=111440
+2026-10-18T17:57:01.414467Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/node-datachannel-0.33.4
+2026-10-18T17:57:01.454430Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz
+2026-10-18T17:57:01.499822Z  INFO Downloaded path=/tmp/.tmpNuJVeW/picocolors-1.1.1.tgz size=2625
+2026-10-18T17:57:01.500590Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/picocolors-1.1.1
+2026-10-18T17:57:01.714956Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/picomatch/-/picomatch-4.0.7.tgz
+2026-10-18T17:57:01.759197Z  INFO Downloaded path=/tmp/.tmpSfKXuM/picomatch-4.0.7.tgz size=24326
+2026-10-18T17:57:01.760129Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/picomatch-4.0.7
+2026-10-18T17:57:01.810544Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/postcss/-/postcss-8.5.30.tgz
+2026-10-18T17:57:01.858697Z  INFO Downloaded path=/tmp/.tmpsHse4a/postcss-8.5.30.tgz size=52903
+2026-10-18T17:57:01.861694Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/postcss-8.5.30
+2026-10-18T17:57:02.081736Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/rolldown/-/rolldown-1.2.14.tgz
+2026-10-18T17:57:02.142636Z  INFO Downloaded path=/tmp/.tmplRWZk8/rolldown-1.2.14.tgz size=203419
+2026-10-18T17:57:02.147058Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/rolldown-1.2.14
+2026-10-18T17:57:02.371023Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.2.tgz
+2026-10-18T17:57:02.411849Z  INFO Downloaded path=/tmp/.tmpIaNWWu/source-map-js-1.2.2.tgz size=36349
+2026-10-18T17:57:02.413544Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/source-map-js-1.2.2
+2026-10-18T17:57:02.633079Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz
+2026-10-18T17:57:02.675822Z  INFO Downloaded path=/tmp/.tmp2ZhStk/tinyglobby-0.2.17.tgz size=7873
+2026-10-18T17:57:02.676829Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/tinyglobby-0.2.17
+2026-10-18T17:57:02.896857Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz
+2026-10-18T17:57:03.207453Z  INFO Downloaded path=/tmp/.tmpucVsPl/typescript-5.9.3.tgz size=4377468
+2026-10-18T17:57:03.275626Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/typescript-5.9.3
+2026-10-18T17:57:03.322621Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/undici-types/-/undici-types-7.24.6.tgz
+2026-10-18T17:57:03.380580Z  INFO Downloaded path=/tmp/.tmp44CNxE/undici-types-7.24.6.tgz size=28510
+2026-10-18T17:57:03.382753Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/undici-types-7.24.6
+2026-10-18T17:57:03.606956Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/vite/-/vite-8.3.4.tgz
+2026-10-18T17:57:03.698916Z  INFO Downloaded path=/tmp/.tmpfNWh83/vite-8.3.4.tgz size=588869
+2026-10-18T17:57:03.707919Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/vite-8.3.4
+2026-10-18T17:57:03.708240Z  INFO Pinned git dependency commit pkg=@etcito/raa commit=3074b3fc15643c12df10043fe617d5943f2d81ad
+2026-10-18T17:57:04.885119Z  INFO Cloned @etcito/raa 3074b3fc1564 in 1.2 s pkg=@etcito/raa commit=3074b3fc1564 seconds=1.176800534
+2026-10-18T17:57:04.885219Z  INFO Fetching Rust stable channel manifest
+2026-10-18T17:57:05.003547Z  INFO Downloading Rust toolchain version=1.99.1 target=x86_64-unknown-linux-gnu
+2026-10-18T17:57:05.003615Z  INFO Downloading Rust component component=cargo url=https://static.rust-lang.org/dist/2026-10-15/cargo-1.99.1-x86_64-unknown-linux-gnu.tar.gz
+2026-10-18T17:57:05.845788Z  INFO Downloaded path=/tmp/.tmppzklw7/cargo-1.99.1-x86_64-unknown-linux-gnu.tar.gz size=14520879
+2026-10-18T17:57:05.999366Z  INFO Downloading Rust component component=rustc url=https://static.rust-lang.org/dist/2026-10-15/rustc-1.99.1-x86_64-unknown-linux-gnu.tar.gz
+2026-10-18T17:57:13.514474Z  INFO Downloaded path=/tmp/.tmpNVwnd8/rustc-1.99.1-x86_64-unknown-linux-gnu.tar.gz size=141445153
+2026-10-18T17:57:15.103146Z  INFO Downloading Rust component component=rust-std url=https://static.rust-lang.org/dist/2026-10-15/rust-std-1.99.1-x86_64-unknown-linux-gnu.tar.gz
+2026-10-18T17:57:17.875687Z  INFO Downloaded path=/tmp/.tmpAYSdRn/rust-std-1.99.1-x86_64-unknown-linux-gnu.tar.gz size=50361623
+2026-10-18T17:57:18.421422Z  INFO Rust toolchain ready version=1.99.1 cargo=/tmp/tmp.7O6Oxxj09T/store/rust/toolchain/1.99.1/bin/cargo
+2026-10-18T17:57:18.421483Z  INFO Adding Rust target wasm32-unknown-unknown to toolchain 1.99.1 version=1.99.1 target=wasm32-unknown-unknown
+2026-10-18T17:57:18.536493Z  INFO Downloading Rust component component=rust-std url=https://static.rust-lang.org/dist/2026-10-15/rust-std-1.99.1-wasm32-unknown-unknown.tar.gz
+2026-10-18T17:57:20.372215Z  INFO Downloaded path=/tmp/.tmpjfOi9w/rust-std-1.99.1-wasm32-unknown-unknown.tar.gz size=34937013
+2026-10-18T17:57:20.802813Z  INFO Node.js runtime ready version=24.22.0 exe=/tmp/tmp.7O6Oxxj09T/store/node/runtime/24.22.0/bin/node
+2026-10-18T17:57:20.802966Z  INFO Building @etcito/raa 3074b3fc1564 pkg=@etcito/raa commit=3074b3fc1564 build=scripts/build-package.sh log=/tmp/tmp.7O6Oxxj09T/store/node/git/raa-a0639513/3074b3fc1564/build-c638ec174063.log
+2026-10-18T17:57:58.074103Z  INFO Built @etcito/raa 3074b3fc1564 in 37.3 s pkg=@etcito/raa commit=3074b3fc1564 seconds=37.258510911 log=/tmp/tmp.7O6Oxxj09T/store/node/git/raa-a0639513/3074b3fc1564/build-c638ec174063.log
+2026-10-18T17:57:58.074175Z  INFO Prepared git dependency @etcito/raa 3074b3fc1564 (0.1.0) pkg=@etcito/raa commit=3074b3fc1564 version=0.1.0 cloned=true installed=false built=true
+2026-10-18T17:57:58.074192Z  INFO Pinned git dependency commit pkg=@gamesaloon/rollback commit=29e78dc322693097a80e083b3eeeb843577ff1ea
+2026-10-18T17:57:59.233358Z  INFO Cloned @gamesaloon/rollback 29e78dc32269 in 1.2 s pkg=@gamesaloon/rollback commit=29e78dc32269 seconds=1.159087637
+2026-10-18T17:57:59.545703Z  INFO Downloading npm tarball tarball=https://registry.npmjs.org/@dimforge/rapier3d-deterministic-compat/-/rapier3d-deterministic-compat-0.21.0.tgz
+2026-10-18T17:58:00.081963Z  INFO Downloaded path=/tmp/.tmpbkwtfD/rapier3d-deterministic-compat-0.21.0.tgz size=5009482
+2026-10-18T17:58:00.140511Z  INFO tar.gz extracted dest=/tmp/tmp.7O6Oxxj09T/store/node/libs/@dimforge+rapier3d-deterministic-compat-0.21.0
+2026-10-18T17:58:00.142179Z  INFO Local Node package (linked, not stored) pkg=@gamesaloon/rollback path=packages/core
+2026-10-18T17:58:00.142206Z  INFO Local Node package (linked, not stored) pkg=@gamesaloon/rollback-rapier path=packages/rapier
+2026-10-18T17:58:00.142273Z  INFO Linked local package pkg=@gamesaloon/rollback target=/tmp/tmp.7O6Oxxj09T/store/node/git/gamesaloon-rollback-5df526e6/29e78dc32269/src/packages/core
+2026-10-18T17:58:00.142305Z  INFO Linked local package pkg=@gamesaloon/rollback-rapier target=/tmp/tmp.7O6Oxxj09T/store/node/git/gamesaloon-rollback-5df526e6/29e78dc32269/src/packages/rapier
+2026-10-18T17:58:00.149599Z  INFO node_modules ready at /tmp/tmp.7O6Oxxj09T/store/node/git/gamesaloon-rollback-5df526e6/29e78dc32269/src/node_modules
+2026-10-18T17:58:00.149851Z  INFO Installed @gamesaloon/rollback 29e78dc32269 in 0.9 s pkg=@gamesaloon/rollback commit=29e78dc32269 packages=4 local=2
+2026-10-18T17:58:00.149862Z  INFO Prepared git dependency @gamesaloon/rollback 29e78dc32269 (0.1.0) pkg=@gamesaloon/rollback commit=29e78dc32269 version=0.1.0 cloned=true installed=true built=false
+2026-10-18T17:58:00.149874Z  INFO Pinned git dependency commit pkg=@gamesaloon/rollback-rapier commit=29e78dc322693097a80e083b3eeeb843577ff1ea
+2026-10-18T17:58:00.149981Z  INFO Local Node package (linked, not stored) pkg=@gamesaloon/rollback path=packages/core
+2026-10-18T17:58:00.149999Z  INFO Local Node package (linked, not stored) pkg=@gamesaloon/rollback-rapier path=packages/rapier
+2026-10-18T17:58:00.150354Z  INFO node_modules ready at /tmp/tmp.7O6Oxxj09T/store/node/git/gamesaloon-rollback-5df526e6/29e78dc32269/src/node_modules
+2026-10-18T17:58:00.150516Z  INFO Prepared git dependency @gamesaloon/rollback-rapier 29e78dc32269 (0.0.1) pkg=@gamesaloon/rollback-rapier commit=29e78dc32269 version=0.0.1 cloned=false installed=false built=false
+2026-10-18T17:58:00.150525Z  INFO Prepared git dependencies clones=2 builds=1 resolved_remote=0 clone_seconds=2.335888171 build_seconds=37.258510911
+2026-10-18T17:58:00.150625Z  INFO kong.rules written path=/tmp/tmp.7O6Oxxj09T/royal-fiesta/kong.rules
+exit=0
+$ kong use
+2026-10-18T17:58:00.188943Z  INFO Applying rules rules=kong.rules clean=false
+2026-10-18T17:58:00.189775Z  INFO Environments will be created in RULEZ env_dir=/root/.local/share/kong/RULEZ/royal-fiesta-87a803be
+2026-10-18T17:58:00.190775Z  INFO Linked local package pkg=@royal-fiesta/game target=/tmp/tmp.7O6Oxxj09T/royal-fiesta/packages/game
+2026-10-18T17:58:00.190814Z  INFO Linked local package pkg=@royal-fiesta/headless target=/tmp/tmp.7O6Oxxj09T/royal-fiesta/apps/headless
+2026-10-18T17:58:00.190847Z  INFO Linked local package pkg=@royal-fiesta/sim target=/tmp/tmp.7O6Oxxj09T/royal-fiesta/packages/sim
+2026-10-18T17:58:00.190879Z  INFO Linked local package pkg=@royal-fiesta/web target=/tmp/tmp.7O6Oxxj09T/royal-fiesta/apps/web
+2026-10-18T17:58:00.191922Z  INFO Linked git dependency pkg=@etcito/raa commit=3074b3fc1564 target=/tmp/tmp.7O6Oxxj09T/store/node/git/raa-a0639513/3074b3fc1564/src/packages/raa
+2026-10-18T17:58:00.192953Z  INFO Linked git dependency pkg=@gamesaloon/rollback commit=29e78dc32269 target=/tmp/tmp.7O6Oxxj09T/store/node/git/gamesaloon-rollback-5df526e6/29e78dc32269/src/packages/core
+2026-10-18T17:58:00.193481Z  INFO Linked git dependency pkg=@gamesaloon/rollback-rapier commit=29e78dc32269 target=/tmp/tmp.7O6Oxxj09T/store/node/git/gamesaloon-rollback-5df526e6/29e78dc32269/src/packages/rapier
+2026-10-18T17:58:00.408378Z  INFO node_modules ready at /root/.local/share/kong/RULEZ/royal-fiesta-87a803be/node_modules
+2026-10-18T17:58:00.412319Z  INFO Node node_modules created path=/root/.local/share/kong/RULEZ/royal-fiesta-87a803be/node_modules
+2026-10-18T17:58:00.412974Z  INFO Project-dir junctions created
+exit=0
+# npm from the Kong-managed Node runtime: /tmp/tmp.7O6Oxxj09T/store/node/runtime/24.22.0/bin
+$ npm run web:build
+
+> web:build
+> npm run build -w @royal-fiesta/web
+
+
+> @royal-fiesta/web@0.0.0 build
+> vite build
+
+vite v8.3.4 building client environment for production...
+transforming...
+✓ 116 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                          0.40 kB │ gzip:     0.27 kB
+dist/client.html                         0.70 kB │ gzip:     0.41 kB
+dist/play.html                           0.71 kB │ gzip:     0.41 kB
+dist/assets/raa_js_bg-kLiutr8_.wasm    468.99 kB │ gzip:   189.58 kB
+dist/assets/index-BU-mqoKb.js            1.90 kB │ gzip:     1.06 kB
+dist/assets/client-Kh1pS1-r.js          19.39 kB │ gzip:     7.49 kB
+dist/assets/play-BcZswIpN.js            36.80 kB │ gzip:    13.80 kB
+dist/assets/raa-CfFRSfCz.js             40.09 kB │ gzip:    11.46 kB
+dist/assets/ops-DnXrKSi4.js            283.71 kB │ gzip:    62.52 kB
+dist/assets/world-BjCUcmpN.js        4,372.37 kB │ gzip: 1,679.66 kB
+
+✓ built in 413ms
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+exit=0
+# second run (cached)
+$ kong rules
+2026-10-18T17:58:01.554741Z  INFO Generating kong.rules path=/tmp/tmp.7O6Oxxj09T/royal-fiesta
+2026-10-18T17:58:01.555851Z  INFO Filtered out platform-incompatible optional Node packages skipped=33 host_os=linux host_cpu=x64 host_libc=Some("glibc")
+2026-10-18T17:58:01.555863Z  INFO Found Node dependencies — ensuring runtime
+2026-10-18T17:58:01.629185Z  INFO Node.js runtime ready version=24.22.0 exe=/tmp/tmp.7O6Oxxj09T/store/node/runtime/24.22.0/bin/node
+2026-10-18T17:58:01.629208Z  INFO Processing Node packages count=27 version=24.22.0
+2026-10-18T17:58:01.629260Z  INFO Local Node package (linked, not stored) pkg=@royal-fiesta/game path=packages/game
+2026-10-18T17:58:01.629279Z  INFO Local Node package (linked, not stored) pkg=@royal-fiesta/headless path=apps/headless
+2026-10-18T17:58:01.629295Z  INFO Local Node package (linked, not stored) pkg=@royal-fiesta/sim path=packages/sim
+2026-10-18T17:58:01.629313Z  INFO Local Node package (linked, not stored) pkg=@royal-fiesta/web path=apps/web
+2026-10-18T17:58:01.629536Z  INFO Reused git dependency commit pkg=@etcito/raa commit=3074b3fc15643c12df10043fe617d5943f2d81ad
+2026-10-18T17:58:01.629625Z  INFO Prepared git dependency @etcito/raa 3074b3fc1564 (0.1.0) pkg=@etcito/raa commit=3074b3fc1564 version=0.1.0 cloned=false installed=false built=false
+2026-10-18T17:58:01.629632Z  INFO Reused git dependency commit pkg=@gamesaloon/rollback commit=29e78dc322693097a80e083b3eeeb843577ff1ea
+2026-10-18T17:58:01.629738Z  INFO Local Node package (linked, not stored) pkg=@gamesaloon/rollback path=packages/core
+2026-10-18T17:58:01.629759Z  INFO Local Node package (linked, not stored) pkg=@gamesaloon/rollback-rapier path=packages/rapier
+2026-10-18T17:58:01.630117Z  INFO node_modules ready at /tmp/tmp.7O6Oxxj09T/store/node/git/gamesaloon-rollback-5df526e6/29e78dc32269/src/node_modules
+2026-10-18T17:58:01.630289Z  INFO Prepared git dependency @gamesaloon/rollback 29e78dc32269 (0.1.0) pkg=@gamesaloon/rollback commit=29e78dc32269 version=0.1.0 cloned=false installed=false built=false
+2026-10-18T17:58:01.630297Z  INFO Reused git dependency commit pkg=@gamesaloon/rollback-rapier commit=29e78dc322693097a80e083b3eeeb843577ff1ea
+2026-10-18T17:58:01.630392Z  INFO Local Node package (linked, not stored) pkg=@gamesaloon/rollback path=packages/core
+2026-10-18T17:58:01.630410Z  INFO Local Node package (linked, not stored) pkg=@gamesaloon/rollback-rapier path=packages/rapier
+2026-10-18T17:58:01.630713Z  INFO node_modules ready at /tmp/tmp.7O6Oxxj09T/store/node/git/gamesaloon-rollback-5df526e6/29e78dc32269/src/node_modules
+2026-10-18T17:58:01.630877Z  INFO Prepared git dependency @gamesaloon/rollback-rapier 29e78dc32269 (0.0.1) pkg=@gamesaloon/rollback-rapier commit=29e78dc32269 version=0.0.1 cloned=false installed=false built=false
+2026-10-18T17:58:01.630886Z  INFO Prepared git dependencies clones=0 builds=0 resolved_remote=0 clone_seconds=0.0 build_seconds=0.0
+2026-10-18T17:58:01.630988Z  INFO kong.rules written path=/tmp/tmp.7O6Oxxj09T/royal-fiesta/kong.rules
+exit=0
+$ kong use
+2026-10-18T17:58:01.668106Z  INFO Applying rules rules=kong.rules clean=false
+2026-10-18T17:58:01.668289Z  INFO Environments will be created in RULEZ env_dir=/root/.local/share/kong/RULEZ/royal-fiesta-87a803be
+2026-10-18T17:58:01.669774Z  INFO node_modules ready at /root/.local/share/kong/RULEZ/royal-fiesta-87a803be/node_modules
+2026-10-18T17:58:01.670456Z  INFO Node node_modules created path=/root/.local/share/kong/RULEZ/royal-fiesta-87a803be/node_modules
+2026-10-18T17:58:01.671304Z  INFO Project-dir junctions created
+exit=0

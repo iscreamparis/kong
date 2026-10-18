@@ -1,0 +1,255 @@
+{
+  "version": 1,
+  "project": "royal-fiesta-87a803be",
+  "generated": "2026-10-18T17:58:01.554848739+00:00",
+  "runtimes": {
+    "node": {
+      "version": "24.22.0",
+      "store_path": "node/runtime/24.22.0"
+    }
+  },
+  "node": {
+    "packages": [
+      {
+        "name": "@node-datachannel/linux-x64-gnu",
+        "version": "0.33.4",
+        "store_path": "node/libs/@node-datachannel+linux-x64-gnu-0.33.4"
+      },
+      {
+        "name": "@oxc-project/types",
+        "version": "0.154.0",
+        "store_path": "node/libs/@oxc-project+types-0.154.0"
+      },
+      {
+        "name": "@rolldown/binding-linux-x64-gnu",
+        "version": "1.2.14",
+        "store_path": "node/libs/@rolldown+binding-linux-x64-gnu-1.2.14"
+      },
+      {
+        "name": "@rolldown/pluginutils",
+        "version": "1.0.1",
+        "store_path": "node/libs/@rolldown+pluginutils-1.0.1"
+      },
+      {
+        "name": "@types/node",
+        "version": "24.19.2",
+        "store_path": "node/libs/@types+node-24.19.2"
+      },
+      {
+        "name": "detect-libc",
+        "version": "2.1.2",
+        "store_path": "node/libs/detect-libc-2.1.2"
+      },
+      {
+        "name": "fdir",
+        "version": "6.5.0",
+        "store_path": "node/libs/fdir-6.5.0"
+      },
+      {
+        "name": "lightningcss",
+        "version": "1.33.0",
+        "store_path": "node/libs/lightningcss-1.33.0"
+      },
+      {
+        "name": "lightningcss-linux-x64-gnu",
+        "version": "1.33.0",
+        "store_path": "node/libs/lightningcss-linux-x64-gnu-1.33.0"
+      },
+      {
+        "name": "nanoid",
+        "version": "3.3.20",
+        "store_path": "node/libs/nanoid-3.3.20"
+      },
+      {
+        "name": "node-datachannel",
+        "version": "0.33.4",
+        "store_path": "node/libs/node-datachannel-0.33.4"
+      },
+      {
+        "name": "picocolors",
+        "version": "1.1.1",
+        "store_path": "node/libs/picocolors-1.1.1"
+      },
+      {
+        "name": "picomatch",
+        "version": "4.0.7",
+        "store_path": "node/libs/picomatch-4.0.7"
+      },
+      {
+        "name": "postcss",
+        "version": "8.5.30",
+        "store_path": "node/libs/postcss-8.5.30"
+      },
+      {
+        "name": "rolldown",
+        "version": "1.2.14",
+        "store_path": "node/libs/rolldown-1.2.14"
+      },
+      {
+        "name": "source-map-js",
+        "version": "1.2.2",
+        "store_path": "node/libs/source-map-js-1.2.2"
+      },
+      {
+        "name": "tinyglobby",
+        "version": "0.2.17",
+        "store_path": "node/libs/tinyglobby-0.2.17"
+      },
+      {
+        "name": "typescript",
+        "version": "5.9.3",
+        "store_path": "node/libs/typescript-5.9.3"
+      },
+      {
+        "name": "undici-types",
+        "version": "7.24.6",
+        "store_path": "node/libs/undici-types-7.24.6"
+      },
+      {
+        "name": "vite",
+        "version": "8.3.4",
+        "store_path": "node/libs/vite-8.3.4"
+      }
+    ],
+    "local": [
+      {
+        "name": "@royal-fiesta/game",
+        "version": "0.0.0",
+        "path": "packages/game"
+      },
+      {
+        "name": "@royal-fiesta/headless",
+        "version": "0.0.0",
+        "path": "apps/headless"
+      },
+      {
+        "name": "@royal-fiesta/sim",
+        "version": "0.0.0",
+        "path": "packages/sim"
+      },
+      {
+        "name": "@royal-fiesta/web",
+        "version": "0.0.0",
+        "path": "apps/web"
+      }
+    ],
+    "git": [
+      {
+        "name": "@etcito/raa",
+        "version": "0.1.0",
+        "source": "github:Etcito/raa#3074b3fc15643c12df10043fe617d5943f2d81ad",
+        "repo": "https://github.com/Etcito/raa.git",
+        "reference": "3074b3fc15643c12df10043fe617d5943f2d81ad",
+        "commit": "3074b3fc15643c12df10043fe617d5943f2d81ad",
+        "path": "packages/raa",
+        "build": "scripts/build-package.sh",
+        "rust_targets": [
+          "wasm32-unknown-unknown"
+        ],
+        "declared_by": "package.json",
+        "store_path": "node/git/raa-a0639513/3074b3fc1564"
+      },
+      {
+        "name": "@gamesaloon/rollback",
+        "version": "0.1.0",
+        "source": "git+https://github.com/Etcito/gamesaloon-rollback.git#29e78dc322693097a80e083b3eeeb843577ff1ea",
+        "repo": "https://github.com/Etcito/gamesaloon-rollback.git",
+        "reference": "29e78dc322693097a80e083b3eeeb843577ff1ea",
+        "commit": "29e78dc322693097a80e083b3eeeb843577ff1ea",
+        "path": "packages/core",
+        "declared_by": "package.json",
+        "store_path": "node/git/gamesaloon-rollback-5df526e6/29e78dc32269",
+        "lock_dir": "",
+        "packages": [
+          {
+            "name": "@dimforge/rapier3d-deterministic-compat",
+            "version": "0.21.0",
+            "store_path": "node/libs/@dimforge+rapier3d-deterministic-compat-0.21.0"
+          },
+          {
+            "name": "@types/node",
+            "version": "24.19.2",
+            "store_path": "node/libs/@types+node-24.19.2"
+          },
+          {
+            "name": "typescript",
+            "version": "5.9.3",
+            "store_path": "node/libs/typescript-5.9.3"
+          },
+          {
+            "name": "undici-types",
+            "version": "7.24.6",
+            "store_path": "node/libs/undici-types-7.24.6"
+          }
+        ],
+        "local": [
+          {
+            "name": "@gamesaloon/rollback",
+            "version": "0.1.0",
+            "path": "packages/core"
+          },
+          {
+            "name": "@gamesaloon/rollback-rapier",
+            "version": "0.0.1",
+            "path": "packages/rapier"
+          }
+        ]
+      },
+      {
+        "name": "@gamesaloon/rollback-rapier",
+        "version": "0.0.1",
+        "source": "git+https://github.com/Etcito/gamesaloon-rollback.git#29e78dc322693097a80e083b3eeeb843577ff1ea",
+        "repo": "https://github.com/Etcito/gamesaloon-rollback.git",
+        "reference": "29e78dc322693097a80e083b3eeeb843577ff1ea",
+        "commit": "29e78dc322693097a80e083b3eeeb843577ff1ea",
+        "path": "packages/rapier",
+        "declared_by": "package.json",
+        "store_path": "node/git/gamesaloon-rollback-5df526e6/29e78dc32269",
+        "lock_dir": "",
+        "packages": [
+          {
+            "name": "@dimforge/rapier3d-deterministic-compat",
+            "version": "0.21.0",
+            "store_path": "node/libs/@dimforge+rapier3d-deterministic-compat-0.21.0"
+          },
+          {
+            "name": "@types/node",
+            "version": "24.19.2",
+            "store_path": "node/libs/@types+node-24.19.2"
+          },
+          {
+            "name": "typescript",
+            "version": "5.9.3",
+            "store_path": "node/libs/typescript-5.9.3"
+          },
+          {
+            "name": "undici-types",
+            "version": "7.24.6",
+            "store_path": "node/libs/undici-types-7.24.6"
+          }
+        ],
+        "local": [
+          {
+            "name": "@gamesaloon/rollback",
+            "version": "0.1.0",
+            "path": "packages/core"
+          },
+          {
+            "name": "@gamesaloon/rollback-rapier",
+            "version": "0.0.1",
+            "path": "packages/rapier"
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "web:build": "npm run build -w @royal-fiesta/web",
+    "rf": "node --experimental-strip-types apps/headless/src/cli.ts",
+    "guard": "node --experimental-strip-types tools/guard.ts",
+    "test": "node --experimental-strip-types --test \"tools/test/*.test.ts\" \"packages/*/test/*.test.ts\" \"apps/headless/test/*.test.ts\"",
+    "prepare": "git config core.hooksPath .githooks || true",
+    "smoke": "node --experimental-strip-types apps/headless/src/smoke.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }
+}

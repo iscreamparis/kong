@@ -1,0 +1,14 @@
+clone_s=0.1
+run1: Cloned @etcito/raa 3074b3fc1564 in 1.2 s
+run1: Built @etcito/raa 3074b3fc1564 in 37.3 s
+run1: Cloned @gamesaloon/rollback 29e78dc32269 in 1.2 s
+run1: Installed @gamesaloon/rollback 29e78dc32269 in 0.9 s
+wall_s git clone --branch nmc/68-kong-dependencies-from-github-b2--m4-royal-fiesta-builds-from /root/nmc/repos/royal-fiesta royal-fiesta=0.1
+wall_s ls -A /tmp/tmp.7O6Oxxj09T=0.0
+wall_s git rev-parse HEAD=0.0
+wall_s kong --version=0.0
+wall_s kong rules=67.1
+wall_s kong use=0.2
+wall_s npm run web:build=1.1
+wall_s kong rules (cached)=0.1
+wall_s kong use (cached)=0.0
