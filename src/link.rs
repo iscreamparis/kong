@@ -50,10 +50,12 @@ pub fn link_package(src: &Path, dst: &Path) -> Result<()> {
 /// resolve the module's realpath into the store, where its sibling packages
 /// (vite -> rolldown) do not exist: `ERR_MODULE_NOT_FOUND` on a store on another
 /// filesystem (a tmpfs /tmp), measured by the Royal Fiesta real case.
+/// A permission error copies too: a store owned by another user (a read-only
+/// sandbox store) refuses hard links under `fs.protected_hardlinks`.
 fn link_file_in_tree(src: &Path, dst: &Path) -> Result<()> {
     match std::fs::hard_link(src, dst) {
         Ok(()) => Ok(()),
-        Err(e) if is_cross_device(&e) => {
+        Err(e) if is_cross_device(&e) || e.kind() == std::io::ErrorKind::PermissionDenied => {
             std::fs::copy(src, dst)
                 .with_context(|| format!("copy fallback failed: {}", src.display()))?;
             Ok(())
@@ -183,6 +185,63 @@ pub fn create_project_junctions(
                 .with_context(|| format!("failed to junction .venv into project dir"))?;
         }
     }
+    if rules.rust.is_some() {
+        link_rust_toolchain(project_dir, env_dir)
+            .with_context(|| format!("failed to link .rust-toolchain into project dir"))?;
+    }
+    Ok(())
+}
+
+/// Files `rust_eco::cargo_env` generates at the top of `.rust-toolchain/`.
+const RUST_TOOLCHAIN_FILES: &[&str] = &["activate.sh", "activate.ps1", "rustc-workspace-wrapper"];
+
+/// Mirror the env's `.rust-toolchain/` into the project as a REAL directory whose
+/// entries link back to it: directories (`bin`, `cargo-home`, `lib`, ...) as
+/// junctions/symlinks, files (the activate scripts) as hard links.
+///
+/// A link named `.rust-toolchain` itself would not do: git's `/.rust-toolchain/`
+/// ignore pattern only matches a directory, so the link would show as untracked.
+/// Files are relinked on every run because the env rewrites them as new files,
+/// which leaves an older hard link pointing at the previous content.
+fn link_rust_toolchain(project_dir: &Path, env_dir: &Path) -> Result<()> {
+    let src = env_dir.join(".rust-toolchain");
+    if !src.is_dir() {
+        return Ok(());
+    }
+    let dst = project_dir.join(".rust-toolchain");
+    if is_dir_link(&dst) {
+        remove_dir_link(&dst)
+            .with_context(|| format!("failed to remove link {}", dst.display()))?;
+    } else if dst.exists() && !dst.is_dir() {
+        warn!(path = %dst.display(), "Not a directory — leaving it in place, Rust env not linked");
+        return Ok(());
+    }
+    std::fs::create_dir_all(&dst).with_context(|| format!("cannot create {}", dst.display()))?;
+
+    for entry in std::fs::read_dir(&src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let (from, to) = (entry.path(), dst.join(&name));
+        if from.is_dir() {
+            ensure_dir_link(&from, &to)?;
+        } else {
+            if is_dir_link(&to) && to.is_dir() {
+                remove_dir_link(&to)?;
+            } else if let Ok(meta) = std::fs::symlink_metadata(&to) {
+                if meta.is_dir() {
+                    warn!(path = %to.display(), "Real directory in place — not linking over it");
+                    continue;
+                }
+                std::fs::remove_file(&to)
+                    .with_context(|| format!("cannot replace {}", to.display()))?;
+            }
+            link_file(&from, &to)?;
+        }
+    }
+    debug!(dst = %dst.display(), "Rust toolchain env linked into project dir");
     Ok(())
 }
 
@@ -210,7 +269,7 @@ fn is_dir_link(p: &Path) -> bool {
 ///   pointing at another machine's RULEZ such as `/Users/<someone>/Library/...`): re-point it.
 ///   Only the link entry is removed, never what it pointed at;
 /// - a real directory or file: left alone (someone's own install, never deleted by kong).
-fn ensure_dir_link(src: &Path, dst: &Path) -> Result<()> {
+pub(crate) fn ensure_dir_link(src: &Path, dst: &Path) -> Result<()> {
     if is_dir_link(dst) {
         let same = match (std::fs::canonicalize(dst), std::fs::canonicalize(src)) {
             (Ok(a), Ok(b)) => a == b,
@@ -278,6 +337,28 @@ pub fn clean_project_junctions(project_dir: &Path) -> Result<()> {
                 }
             }
         }
+    }
+    clean_rust_toolchain_links(&project_dir.join(".rust-toolchain"))
+}
+
+/// Undo `link_rust_toolchain`: remove the directory links and generated files it
+/// made, then the directory when nothing else is left in it.
+fn clean_rust_toolchain_links(dir: &Path) -> Result<()> {
+    if is_dir_link(dir) {
+        return remove_dir_link(dir);
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return Ok(()) };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        let name = entry.file_name();
+        if is_dir_link(&p) {
+            remove_dir_link(&p)?;
+        } else if RUST_TOOLCHAIN_FILES.iter().any(|f| name == *f) && p.is_file() {
+            std::fs::remove_file(&p)?;
+        }
+    }
+    if std::fs::remove_dir(dir).is_ok() {
+        debug!(path = %dir.display(), ".rust-toolchain links removed");
     }
     Ok(())
 }
@@ -561,5 +642,45 @@ mod tests {
         ensure_dir_link(&src, &dst).unwrap();
         assert!(dst.join("left-pad").is_dir());
         assert!(!dst.is_symlink());
+    }
+
+    /// The project's `.rust-toolchain` is a REAL directory (git's `/.rust-toolchain/`
+    /// pattern ignores directories only) whose entries link into the env. A file the
+    /// env rewrote is relinked, and cleaning removes the links, never the env.
+    #[cfg(unix)]
+    #[test]
+    fn rust_toolchain_is_mirrored_as_a_real_directory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        let env = tmp.path().join("env");
+        let tc = env.join(".rust-toolchain");
+        std::fs::create_dir_all(tc.join("bin")).unwrap();
+        std::fs::create_dir_all(tc.join("cargo-home")).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(tc.join("bin/cargo"), "#!/bin/sh\n").unwrap();
+        std::fs::write(tc.join("activate.sh"), "export A=1\n").unwrap();
+        std::fs::write(tc.join(".kong-toolchain"), "/store/rust/toolchain/1.90.0").unwrap();
+        let rules: crate::config::KongRules = serde_json::from_value(serde_json::json!({
+            "version": 1, "project": "t", "generated": "test", "rust": {"packages": []}
+        }))
+        .unwrap();
+
+        create_project_junctions(&project, &env, &rules).unwrap();
+        let dst = project.join(".rust-toolchain");
+        assert!(dst.is_dir() && !dst.is_symlink());
+        assert_eq!(std::fs::read_link(dst.join("bin")).unwrap(), tc.join("bin"));
+        assert!(dst.join("cargo-home").is_symlink());
+        assert_eq!(std::fs::read_to_string(dst.join("activate.sh")).unwrap(), "export A=1\n");
+        assert!(!dst.join(".kong-toolchain").exists());
+
+        // The env rewrites activate.sh as a new file (unlink + write).
+        std::fs::remove_file(tc.join("activate.sh")).unwrap();
+        std::fs::write(tc.join("activate.sh"), "export A=2\n").unwrap();
+        create_project_junctions(&project, &env, &rules).unwrap();
+        assert_eq!(std::fs::read_to_string(dst.join("activate.sh")).unwrap(), "export A=2\n");
+
+        clean_project_junctions(&project).unwrap();
+        assert!(std::fs::symlink_metadata(&dst).is_err());
+        assert!(tc.join("bin/cargo").is_file() && tc.join("activate.sh").is_file());
     }
 }
