@@ -10,10 +10,10 @@ const NODE_INDEX: &str = "https://nodejs.org/dist/index.json";
 
 /// A resolved Node runtime in the store.
 pub struct NodeRuntime {
-    pub version: String,        // e.g. "22.11.0"
-    pub store_path: String,     // relative, e.g. "node/runtime/22.11.0"
-    pub _node_exe: PathBuf,     // absolute path to node.exe / node
-    pub _npm_exe: PathBuf,      // absolute path to npm / npm.cmd
+    pub version: String,    // e.g. "22.11.0"
+    pub store_path: String, // relative, e.g. "node/runtime/22.11.0"
+    pub _node_exe: PathBuf, // absolute path to node.exe / node
+    pub _npm_exe: PathBuf,  // absolute path to npm / npm.cmd
 }
 
 /// Ensure the requested Node version is present in the store.
@@ -31,20 +31,33 @@ pub fn ensure_runtime(store_root: &Path, requested: &str) -> Result<NodeRuntime>
         download_and_extract(&tarball_url, &runtime_dir)?;
     }
 
-    let node_exe = node_exe_in(&runtime_dir)
-        .with_context(|| format!("node executable not found after extraction in {}", runtime_dir.display()))?;
-    let npm_exe = npm_exe_in(&runtime_dir)
-        .with_context(|| format!("npm not found after extraction in {}", runtime_dir.display()))?;
+    let node_exe = node_exe_in(&runtime_dir).with_context(|| {
+        format!(
+            "node executable not found after extraction in {}",
+            runtime_dir.display()
+        )
+    })?;
+    let npm_exe = npm_exe_in(&runtime_dir).with_context(|| {
+        format!(
+            "npm not found after extraction in {}",
+            runtime_dir.display()
+        )
+    })?;
 
     info!(version = %version, exe = %node_exe.display(), "Node.js runtime ready");
-    Ok(NodeRuntime { version, store_path, _node_exe: node_exe, _npm_exe: npm_exe })
+    Ok(NodeRuntime {
+        version,
+        store_path,
+        _node_exe: node_exe,
+        _npm_exe: npm_exe,
+    })
 }
 
 // ── Internal helpers ────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct NodeRelease {
-    version: String,    // "v22.11.0"
+    version: String,        // "v22.11.0"
     lts: serde_json::Value, // false | "Jod" (LTS codename)
 }
 
@@ -79,9 +92,8 @@ fn resolve_release(requested: &str) -> Result<(String, String)> {
         }
     });
 
-    let release = chosen.with_context(|| {
-        format!("No Node.js release found matching '{requested}'")
-    })?;
+    let release =
+        chosen.with_context(|| format!("No Node.js release found matching '{requested}'"))?;
 
     let version = release.version.trim_start_matches('v').to_string();
     let url = build_download_url(&release.version, &version);
@@ -95,7 +107,11 @@ fn build_download_url(v_version: &str, version: &str) -> String {
 
     #[cfg(target_os = "macos")]
     {
-        let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
+        let arch = if cfg!(target_arch = "aarch64") {
+            "arm64"
+        } else {
+            "x64"
+        };
         return format!("https://nodejs.org/dist/{v_version}/node-v{version}-darwin-{arch}.tar.gz");
     }
 
@@ -107,15 +123,17 @@ fn download_and_extract(url: &str, dest: &Path) -> Result<()> {
     info!(url = %url, "Downloading Node.js runtime archive");
     let tmp = tempfile::TempDir::new()?;
     let result = crate::download::download_and_verify(url, tmp.path(), None)?;
-    info!(size = result.path.metadata().map(|m| m.len()).unwrap_or(0), "Downloaded Node.js runtime");
+    info!(
+        size = result.path.metadata().map(|m| m.len()).unwrap_or(0),
+        "Downloaded Node.js runtime"
+    );
 
     std::fs::create_dir_all(dest)?;
 
     #[cfg(windows)]
     {
         // Node Windows ships as a zip: node-vX.Y.Z-win-x64/...
-        extract_zip_strip1(&result.path, dest)
-            .context("failed to extract Node.js zip")?;
+        extract_zip_strip1(&result.path, dest).context("failed to extract Node.js zip")?;
     }
 
     #[cfg(not(windows))]

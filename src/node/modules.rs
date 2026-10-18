@@ -40,8 +40,13 @@ pub fn build_node_modules(
     // never a nested one that happens to be listed earlier. Then the nested
     // installs, shallowest first so a parent exists before its own nested dir.
     let top: Vec<&PackageEntry> = node.packages.iter().filter(|p| p.path.is_none()).collect();
-    let mut nested: Vec<&PackageEntry> = node.packages.iter().filter(|p| p.path.is_some()).collect();
-    nested.sort_by_key(|p| p.path.as_deref().map_or(0, |s| s.matches("node_modules/").count()));
+    let mut nested: Vec<&PackageEntry> =
+        node.packages.iter().filter(|p| p.path.is_some()).collect();
+    nested.sort_by_key(|p| {
+        p.path
+            .as_deref()
+            .map_or(0, |s| s.matches("node_modules/").count())
+    });
 
     let mut placed: HashSet<std::path::PathBuf> = HashSet::new();
     for pkg in top.into_iter().chain(nested) {
@@ -113,7 +118,10 @@ pub fn build_node_modules(
     std::fs::create_dir_all(&bin_dir)?;
 
     // Bins of registry AND local packages: npm links both.
-    let bin_owners = node.packages.iter().map(|p| p.name.as_str())
+    let bin_owners = node
+        .packages
+        .iter()
+        .map(|p| p.name.as_str())
         .chain(node.local.iter().map(|l| l.name.as_str()));
     for pkg_name in bin_owners {
         let top_level = nm.join(pkg_name);
@@ -143,7 +151,7 @@ pub fn build_node_modules(
                 .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                 .collect()
         } else {
-            continue
+            continue;
         };
 
         for (bin_name, rel_path) in entries {
@@ -259,7 +267,10 @@ pub fn link_local_packages(
                  resolved to   : {}\n\
                  Restore the directory or fix the dependency in package.json, then re-run \
                  `kong rules`.",
-                lp.name, lp.path, project_dir.display(), target.display()
+                lp.name,
+                lp.path,
+                project_dir.display(),
+                target.display()
             );
         }
         let dst = nm.join(&lp.name);
@@ -278,14 +289,20 @@ pub fn link_local_packages(
             // of the same name, deep hard links). Safe to drop: it is the env's
             // own tree, not the store and not the local package.
             link::remove_dir_all_robust(&dst).with_context(|| {
-                format!("failed to replace {} with a link to local package '{}'", dst.display(), lp.name)
+                format!(
+                    "failed to replace {} with a link to local package '{}'",
+                    dst.display(),
+                    lp.name
+                )
             })?;
         }
 
         link::link_dir(&target, &dst).with_context(|| {
             format!(
                 "failed to link local Node package '{}': {} -> {}",
-                lp.name, dst.display(), target.display()
+                lp.name,
+                dst.display(),
+                target.display()
             )
         })?;
         info!(pkg = %lp.name, target = %target.display(), "Linked local package");
@@ -341,19 +358,29 @@ mod tests {
     use super::*;
 
     fn local(name: &str, path: &str) -> LocalPackageEntry {
-        LocalPackageEntry { name: name.into(), version: "0.1.0".into(), path: path.into() }
+        LocalPackageEntry {
+            name: name.into(),
+            version: "0.1.0".into(),
+            path: path.into(),
+        }
     }
 
     /// Layout: <root>/vendor/atoms (the local package) and <root>/app (the
     /// project, declaring `file:../vendor/atoms`), env dir elsewhere.
-    fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    fn fixture() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
         let root = tempfile::TempDir::new().unwrap();
         let vendor = root.path().join("vendor").join("atoms");
         std::fs::create_dir_all(vendor.join("bin")).unwrap();
         std::fs::write(
             vendor.join("package.json"),
             r#"{"name":"@real3d/atoms","version":"0.1.0","bin":{"atoms-cli":"bin/cli.js"}}"#,
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::write(vendor.join("bin").join("cli.js"), "console.log(1)").unwrap();
         std::fs::write(vendor.join("marker.txt"), "live source").unwrap();
         let app = root.path().join("app");
@@ -387,12 +414,18 @@ mod tests {
     #[test]
     fn use_links_local_package_to_its_directory() {
         let (_root, vendor, app, env) = fixture();
-        let node = NodeSection { packages: vec![], local: vec![local("@real3d/atoms", "../vendor/atoms")] };
+        let node = NodeSection {
+            packages: vec![],
+            local: vec![local("@real3d/atoms", "../vendor/atoms")],
+        };
         let store = tempfile::TempDir::new().unwrap();
         build_node_modules(&env, &app, &node, store.path()).unwrap();
 
         let dst = env.join("node_modules").join("@real3d").join("atoms");
-        assert!(is_dir_link(&dst), "node_modules/@real3d/atoms must be a junction/symlink");
+        assert!(
+            is_dir_link(&dst),
+            "node_modules/@real3d/atoms must be a junction/symlink"
+        );
         assert_eq!(
             std::fs::canonicalize(&dst).unwrap(),
             std::fs::canonicalize(&vendor).unwrap(),
@@ -400,7 +433,10 @@ mod tests {
         );
         // Live: a change in the source is visible through the link (not a copy).
         std::fs::write(vendor.join("marker.txt"), "edited").unwrap();
-        assert_eq!(std::fs::read_to_string(dst.join("marker.txt")).unwrap(), "edited");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("marker.txt")).unwrap(),
+            "edited"
+        );
         // Nothing of it went to the store.
         assert_eq!(std::fs::read_dir(store.path()).unwrap().count(), 0);
         // Its bin got a shim, like npm does for a linked package.
@@ -415,7 +451,10 @@ mod tests {
     fn use_is_idempotent_and_repoints_a_moved_local_package() {
         let (root, vendor, app, env) = fixture();
         let store = tempfile::TempDir::new().unwrap();
-        let node = NodeSection { packages: vec![], local: vec![local("@real3d/atoms", "../vendor/atoms")] };
+        let node = NodeSection {
+            packages: vec![],
+            local: vec![local("@real3d/atoms", "../vendor/atoms")],
+        };
         build_node_modules(&env, &app, &node, store.path()).unwrap();
         build_node_modules(&env, &app, &node, store.path()).unwrap(); // twice: no error
 
@@ -423,22 +462,35 @@ mod tests {
         // target is left intact (only the link entry is removed).
         let other = root.path().join("CRM_Atoms");
         std::fs::create_dir_all(&other).unwrap();
-        std::fs::write(other.join("package.json"), r#"{"name":"@real3d/atoms","version":"0.2.0"}"#).unwrap();
-        let moved = NodeSection { packages: vec![], local: vec![local("@real3d/atoms", "../CRM_Atoms")] };
+        std::fs::write(
+            other.join("package.json"),
+            r#"{"name":"@real3d/atoms","version":"0.2.0"}"#,
+        )
+        .unwrap();
+        let moved = NodeSection {
+            packages: vec![],
+            local: vec![local("@real3d/atoms", "../CRM_Atoms")],
+        };
         build_node_modules(&env, &app, &moved, store.path()).unwrap();
         let dst = env.join("node_modules").join("@real3d").join("atoms");
         assert_eq!(
             std::fs::canonicalize(&dst).unwrap(),
             std::fs::canonicalize(&other).unwrap()
         );
-        assert!(vendor.join("marker.txt").exists(), "old target must be untouched");
+        assert!(
+            vendor.join("marker.txt").exists(),
+            "old target must be untouched"
+        );
     }
 
     #[test]
     fn use_errors_clearly_when_local_target_is_missing() {
         let (_root, _vendor, app, env) = fixture();
         let store = tempfile::TempDir::new().unwrap();
-        let node = NodeSection { packages: vec![], local: vec![local("@real3d/atoms", "../nowhere/atoms")] };
+        let node = NodeSection {
+            packages: vec![],
+            local: vec![local("@real3d/atoms", "../nowhere/atoms")],
+        };
         let err = build_node_modules(&env, &app, &node, store.path()).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("@real3d/atoms"), "{msg}");
@@ -450,11 +502,17 @@ mod tests {
     fn clean_environments_never_deletes_through_a_local_link() {
         let (_root, vendor, app, env) = fixture();
         let store = tempfile::TempDir::new().unwrap();
-        let node = NodeSection { packages: vec![], local: vec![local("@real3d/atoms", "../vendor/atoms")] };
+        let node = NodeSection {
+            packages: vec![],
+            local: vec![local("@real3d/atoms", "../vendor/atoms")],
+        };
         build_node_modules(&env, &app, &node, store.path()).unwrap();
         link::clean_environments(&env, false).unwrap();
         assert!(!env.join("node_modules").exists());
-        assert!(vendor.join("marker.txt").exists(), "local package source must survive a clean");
+        assert!(
+            vendor.join("marker.txt").exists(),
+            "local package source must survive a clean"
+        );
         assert!(vendor.join("package.json").exists());
     }
 
@@ -470,11 +528,20 @@ mod tests {
         std::fs::write(
             dir.join("package.json"),
             format!(r#"{{"name":"{name}","version":"{version}"}}"#),
-        ).unwrap();
-        std::fs::write(dir.join("index.js"), format!("module.exports='{name}@{version}'")).unwrap();
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("index.js"),
+            format!("module.exports='{name}@{version}'"),
+        )
+        .unwrap();
         PackageEntry {
-            name: name.into(), version: version.into(), hash: None, store_path,
-            source_url: None, path: None,
+            name: name.into(),
+            version: version.into(),
+            hash: None,
+            store_path,
+            source_url: None,
+            path: None,
         }
     }
 
@@ -492,29 +559,54 @@ mod tests {
     fn nested_packages(store: &Path) -> Vec<PackageEntry> {
         vec![
             store_pkg(store, "path-scurry", "1.2.0"),
-            nested(store_pkg(store, "lru-cache", "11.5.2"), "node_modules/path-scurry/node_modules/lru-cache"),
+            nested(
+                store_pkg(store, "lru-cache", "11.5.2"),
+                "node_modules/path-scurry/node_modules/lru-cache",
+            ),
             store_pkg(store, "lru-cache", "5.1.1"),
         ]
     }
 
     fn tree(root: &Path) -> Vec<std::path::PathBuf> {
-        walkdir::WalkDir::new(root).sort_by_file_name().into_iter().filter_map(|e| e.ok())
-            .map(|e| e.path().strip_prefix(root).unwrap().to_path_buf()).collect()
+        walkdir::WalkDir::new(root)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().strip_prefix(root).unwrap().to_path_buf())
+            .collect()
     }
 
     #[test]
     fn nested_install_keeps_own_version_whatever_the_order() {
         let store = tempfile::TempDir::new().unwrap();
         let base = nested_packages(store.path());
-        let perms: [[usize; 3]; 6] = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]];
+        let perms: [[usize; 3]; 6] = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
         for perm in perms {
             let env = tempfile::TempDir::new().unwrap();
-            let node = NodeSection { packages: perm.iter().map(|&i| base[i].clone()).collect(), local: vec![] };
+            let node = NodeSection {
+                packages: perm.iter().map(|&i| base[i].clone()).collect(),
+                local: vec![],
+            };
             build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
-            assert_eq!(version_at(env.path(), "node_modules/lru-cache"), "5.1.1", "order {perm:?}");
             assert_eq!(
-                version_at(env.path(), "node_modules/path-scurry/node_modules/lru-cache"),
-                "11.5.2", "order {perm:?}"
+                version_at(env.path(), "node_modules/lru-cache"),
+                "5.1.1",
+                "order {perm:?}"
+            );
+            assert_eq!(
+                version_at(
+                    env.path(),
+                    "node_modules/path-scurry/node_modules/lru-cache"
+                ),
+                "11.5.2",
+                "order {perm:?}"
             );
         }
     }
@@ -525,15 +617,27 @@ mod tests {
         let env = tempfile::TempDir::new().unwrap();
         let node = NodeSection {
             packages: vec![
-                nested(store_pkg(store.path(), "@scope/inner", "3.0.0"), "node_modules/@scope/outer/node_modules/@scope/inner"),
+                nested(
+                    store_pkg(store.path(), "@scope/inner", "3.0.0"),
+                    "node_modules/@scope/outer/node_modules/@scope/inner",
+                ),
                 store_pkg(store.path(), "@scope/outer", "2.0.0"),
                 // parent never installed: the nested entry is skipped, no stray dir.
-                nested(store_pkg(store.path(), "orphan", "1.0.0"), "node_modules/missing/node_modules/orphan"),
+                nested(
+                    store_pkg(store.path(), "orphan", "1.0.0"),
+                    "node_modules/missing/node_modules/orphan",
+                ),
             ],
             local: vec![],
         };
         build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
-        assert_eq!(version_at(env.path(), "node_modules/@scope/outer/node_modules/@scope/inner"), "3.0.0");
+        assert_eq!(
+            version_at(
+                env.path(),
+                "node_modules/@scope/outer/node_modules/@scope/inner"
+            ),
+            "3.0.0"
+        );
         assert!(!env.path().join("node_modules/missing").exists());
     }
 
@@ -541,14 +645,24 @@ mod tests {
     fn nested_use_is_idempotent_and_never_writes_the_store() {
         let store = tempfile::TempDir::new().unwrap();
         let env = tempfile::TempDir::new().unwrap();
-        let node = NodeSection { packages: nested_packages(store.path()), local: vec![] };
+        let node = NodeSection {
+            packages: nested_packages(store.path()),
+            local: vec![],
+        };
         let before = tree(store.path());
         build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
         let first = tree(env.path());
         build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
-        assert_eq!(first, tree(env.path()), "second `kong use` must leave the same tree");
+        assert_eq!(
+            first,
+            tree(env.path()),
+            "second `kong use` must leave the same tree"
+        );
         assert_eq!(before, tree(store.path()), "store must be untouched");
-        assert!(!store.path().join("node/libs/path-scurry-1.2.0/package/node_modules").exists());
+        assert!(!store
+            .path()
+            .join("node/libs/path-scurry-1.2.0/package/node_modules")
+            .exists());
     }
 
     #[test]
@@ -557,15 +671,30 @@ mod tests {
         let env = tempfile::TempDir::new().unwrap();
         let pkgs = nested_packages(store.path());
         // Old kong: 11.5.2 hoisted at top level, nothing nested.
-        let mut old = NodeSection { packages: vec![pkgs[0].clone(), pkgs[1].clone()], local: vec![] };
+        let mut old = NodeSection {
+            packages: vec![pkgs[0].clone(), pkgs[1].clone()],
+            local: vec![],
+        };
         old.packages[1].path = None;
         build_node_modules(env.path(), env.path(), &old, store.path()).unwrap();
         assert_eq!(version_at(env.path(), "node_modules/lru-cache"), "11.5.2");
 
-        let node = NodeSection { packages: pkgs, local: vec![] };
+        let node = NodeSection {
+            packages: pkgs,
+            local: vec![],
+        };
         build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
         assert_eq!(version_at(env.path(), "node_modules/lru-cache"), "5.1.1");
-        assert_eq!(version_at(env.path(), "node_modules/path-scurry/node_modules/lru-cache"), "11.5.2");
-        assert!(store.path().join("node/libs/lru-cache-11.5.2/package/index.js").is_file());
+        assert_eq!(
+            version_at(
+                env.path(),
+                "node_modules/path-scurry/node_modules/lru-cache"
+            ),
+            "11.5.2"
+        );
+        assert!(store
+            .path()
+            .join("node/libs/lru-cache-11.5.2/package/index.js")
+            .is_file());
     }
 }

@@ -113,10 +113,17 @@ fn prefer_absolute_manifest_paths(deps: &mut [NodeDep], manifest: &Path) -> Resu
     let doc: serde_json::Value = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse JSON: {}", manifest.display()))?;
     for section in &["dependencies", "devDependencies", "optionalDependencies"] {
-        let Some(map) = doc.get(section).and_then(|d| d.as_object()) else { continue };
+        let Some(map) = doc.get(section).and_then(|d| d.as_object()) else {
+            continue;
+        };
         for (name, spec) in map {
             let spec = spec.as_str().unwrap_or_default();
-            let Some(p) = spec.strip_prefix("file:").or_else(|| spec.strip_prefix("link:")) else { continue };
+            let Some(p) = spec
+                .strip_prefix("file:")
+                .or_else(|| spec.strip_prefix("link:"))
+            else {
+                continue;
+            };
             let p = p.replace('\\', "/");
             if !Path::new(&p).is_absolute() && !is_windows_absolute(&p) {
                 continue;
@@ -175,8 +182,14 @@ pub fn filter_for_host(deps: Vec<NodeDep>, host: &HostTriple) -> Result<Vec<Node
                 "package '{}@{}' is not compatible with this host \
                  (os={:?} cpu={:?} libc={:?}; host os={} cpu={} libc={:?}) \
                  — it is a required dependency (EBADPLATFORM)",
-                dep.name, dep.version, dep.os, dep.cpu, dep.libc,
-                host.os, host.cpu, host.libc
+                dep.name,
+                dep.version,
+                dep.os,
+                dep.cpu,
+                dep.libc,
+                host.os,
+                host.cpu,
+                host.libc
             );
         }
     }
@@ -216,7 +229,9 @@ pub fn parse_package_lock(path: &Path) -> Result<Vec<NodeDep>> {
 
     // v3 / v2 format: "packages" map
     if let Some(packages) = doc.get("packages").and_then(|p| p.as_object()) {
-        let lock_name = path.file_name().map(|n| n.to_string_lossy().into_owned())
+        let lock_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "package-lock.json".into());
         for (key, value) in packages {
             // Skip the root entry (empty key)
@@ -281,8 +296,11 @@ pub fn parse_package_lock(path: &Path) -> Result<Vec<NodeDep>> {
                              (\"file:<dir>\") or publish the package to a registry."
                         );
                     }
-                    let version = value.get("version").and_then(|v| v.as_str())
-                        .unwrap_or("0.0.0").to_string();
+                    let version = value
+                        .get("version")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("0.0.0")
+                        .to_string();
                     deps.push(NodeDep {
                         path: None,
                         name,
@@ -387,7 +405,10 @@ fn parse_v1_level(
 
         // v1 lockfiles spell a local dependency as `"version": "file:../lib"`.
         // It is a directory to link, never a registry version.
-        if let Some(p) = version.strip_prefix("file:").or_else(|| version.strip_prefix("link:")) {
+        if let Some(p) = version
+            .strip_prefix("file:")
+            .or_else(|| version.strip_prefix("link:"))
+        {
             if !is_tarball_path(p) {
                 out.push(NodeDep {
                     path: None,
@@ -401,7 +422,9 @@ fn parse_v1_level(
                     optional: false,
                     local: Some(LocalSource {
                         path: p.replace('\\', "/"),
-                        origin: format!("package-lock.json (v1) dependency \"{name}\": \"{version}\""),
+                        origin: format!(
+                            "package-lock.json (v1) dependency \"{name}\": \"{version}\""
+                        ),
                     }),
                 });
             }
@@ -420,7 +443,11 @@ fn parse_v1_level(
 
         if !version.is_empty() {
             out.push(NodeDep {
-                path: if parent.is_some() { Some(key.clone()) } else { None },
+                path: if parent.is_some() {
+                    Some(key.clone())
+                } else {
+                    None
+                },
                 name: name.clone(),
                 version,
                 _resolved: resolved,
@@ -582,7 +609,8 @@ fn local_dep_from_link(
     if norm.starts_with("node_modules/") || norm.contains("/node_modules/") {
         return None;
     }
-    if !key.starts_with("node_modules/") || key["node_modules/".len()..].contains("/node_modules/") {
+    if !key.starts_with("node_modules/") || key["node_modules/".len()..].contains("/node_modules/")
+    {
         tracing::warn!(
             key = %key, resolved = %resolved,
             "Nested local link in {lock_name} is not placed by kong (flat node_modules); skipping"
@@ -604,7 +632,10 @@ fn local_dep_from_link(
         os: Vec::new(),
         cpu: Vec::new(),
         libc: Vec::new(),
-        optional: value.get("optional").and_then(|v| v.as_bool()).unwrap_or(false),
+        optional: value
+            .get("optional")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         local: Some(LocalSource {
             path: norm,
             origin: format!("{lock_name} entry \"{key}\" (link → \"{resolved}\")"),
@@ -682,17 +713,27 @@ mod tests {
         std::fs::write(tmp.path(), LOCAL_LOCK).unwrap();
         let deps = parse_package_lock(tmp.path()).unwrap();
 
-        let registry: Vec<(&str, &str)> = deps.iter().filter(|d| !d.is_local())
-            .map(|d| (d.name.as_str(), d.version.as_str())).collect();
+        let registry: Vec<(&str, &str)> = deps
+            .iter()
+            .filter(|d| !d.is_local())
+            .map(|d| (d.name.as_str(), d.version.as_str()))
+            .collect();
         assert_eq!(registry, vec![("@vue/shared", "3.5.13"), ("vue", "3.5.13")]);
 
         let locals: Vec<&NodeDep> = deps.iter().filter(|d| d.is_local()).collect();
         assert_eq!(locals.len(), 1, "exactly one local dep: {deps:?}");
         assert_eq!(locals[0].name, "@real3d/atoms");
-        assert_eq!(locals[0].version, "0.1.0", "version read from the link target entry");
+        assert_eq!(
+            locals[0].version, "0.1.0",
+            "version read from the link target entry"
+        );
         let src = locals[0].local.as_ref().unwrap();
         assert_eq!(src.path, "../vendor/atoms");
-        assert!(src.origin.contains("node_modules/@real3d/atoms"), "{}", src.origin);
+        assert!(
+            src.origin.contains("node_modules/@real3d/atoms"),
+            "{}",
+            src.origin
+        );
 
         // Nothing path-shaped may ever reach the registry client.
         assert!(deps.iter().all(|d| !d.name.starts_with('.')), "{deps:?}");
@@ -706,13 +747,22 @@ mod tests {
         let root = tempfile::TempDir::new().unwrap();
         let vendor = root.path().join("vendor").join("atoms");
         std::fs::create_dir_all(&vendor).unwrap();
-        std::fs::write(vendor.join("package.json"), r#"{"name":"@real3d/atoms","version":"0.1.0"}"#).unwrap();
+        std::fs::write(
+            vendor.join("package.json"),
+            r#"{"name":"@real3d/atoms","version":"0.1.0"}"#,
+        )
+        .unwrap();
         // The project sits at a depth the lockfile's relative path was NOT resolved from.
         let app = root.path().join("worktrees").join("7").join("12");
         std::fs::create_dir_all(&app).unwrap();
         let abs = vendor.to_string_lossy().replace('\\', "/");
-        std::fs::write(app.join("package.json"), format!(
-            r#"{{"name":"p","dependencies":{{"@real3d/atoms":"file:{abs}","vue":"^3.5.0"}}}}"#)).unwrap();
+        std::fs::write(
+            app.join("package.json"),
+            format!(
+                r#"{{"name":"p","dependencies":{{"@real3d/atoms":"file:{abs}","vue":"^3.5.0"}}}}"#
+            ),
+        )
+        .unwrap();
         std::fs::write(app.join("package-lock.json"), r#"{
             "lockfileVersion": 3,
             "packages": {
@@ -726,12 +776,21 @@ mod tests {
         let atoms = deps.iter().find(|d| d.name == "@real3d/atoms").unwrap();
         let local = atoms.local.as_ref().unwrap();
         assert_eq!(local.path, abs, "absolute manifest path kept: {deps:?}");
-        assert!(local.origin.starts_with("package.json dependencies"), "{}", local.origin);
-        assert_eq!(atoms.version, "0.1.0", "version still read from the lockfile");
+        assert!(
+            local.origin.starts_with("package.json dependencies"),
+            "{}",
+            local.origin
+        );
+        assert_eq!(
+            atoms.version, "0.1.0",
+            "version still read from the lockfile"
+        );
         let entry = crate::config::local_entry_for(&app, &atoms.name, local).unwrap();
         assert_eq!(entry.resolve(&app), vendor);
         // registry packages untouched
-        assert!(deps.iter().any(|d| d.name == "vue" && d.version == "3.5.13" && d.local.is_none()));
+        assert!(deps
+            .iter()
+            .any(|d| d.name == "vue" && d.version == "3.5.13" && d.local.is_none()));
     }
 
     /// A RELATIVE manifest path leaves the lockfile's entry exactly as before.
@@ -740,20 +799,31 @@ mod tests {
         let root = tempfile::TempDir::new().unwrap();
         let app = root.path().join("app");
         std::fs::create_dir_all(&app).unwrap();
-        std::fs::write(app.join("package.json"),
-            r#"{"name":"p","dependencies":{"@real3d/atoms":"file:../vendor/atoms"}}"#).unwrap();
-        std::fs::write(app.join("package-lock.json"), r#"{
+        std::fs::write(
+            app.join("package.json"),
+            r#"{"name":"p","dependencies":{"@real3d/atoms":"file:../vendor/atoms"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            app.join("package-lock.json"),
+            r#"{
             "lockfileVersion": 3,
             "packages": {
                 "": { "name": "p" },
                 "../vendor/atoms": { "name": "@real3d/atoms", "version": "0.1.0" },
                 "node_modules/@real3d/atoms": { "resolved": "../vendor/atoms", "link": true }
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
         let deps = parse_all(&app).unwrap();
         let local = deps[0].local.as_ref().unwrap();
         assert_eq!(local.path, "../vendor/atoms");
-        assert!(local.origin.starts_with("package-lock.json"), "{}", local.origin);
+        assert!(
+            local.origin.starts_with("package-lock.json"),
+            "{}",
+            local.origin
+        );
     }
 
     #[test]
@@ -790,9 +860,16 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), json).unwrap();
         let deps = parse_package_lock(tmp.path()).unwrap();
-        let reg: Vec<&str> = deps.iter().filter(|d| !d.is_local()).map(|d| d.name.as_str()).collect();
+        let reg: Vec<&str> = deps
+            .iter()
+            .filter(|d| !d.is_local())
+            .map(|d| d.name.as_str())
+            .collect();
         assert_eq!(reg, vec!["is-number"]);
-        let loc: Vec<(&str, &str)> = deps.iter().filter_map(|d| d.local.as_ref().map(|l| (d.name.as_str(), l.path.as_str()))).collect();
+        let loc: Vec<(&str, &str)> = deps
+            .iter()
+            .filter_map(|d| d.local.as_ref().map(|l| (d.name.as_str(), l.path.as_str())))
+            .collect();
         assert_eq!(loc, vec![("lib", "packages/lib")]);
     }
 
@@ -822,7 +899,10 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), json).unwrap();
         let err = parse_package_lock(tmp.path()).unwrap_err().to_string();
-        assert!(err.contains("node_modules/x") && err.contains("tarball"), "{err}");
+        assert!(
+            err.contains("node_modules/x") && err.contains("tarball"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -839,10 +919,18 @@ mod tests {
         std::fs::write(tmp.path(), json).unwrap();
         let deps = parse_package_json(tmp.path()).unwrap();
         let atoms = deps.iter().find(|d| d.name == "@real3d/atoms").unwrap();
-        assert_eq!(atoms.local.as_ref().unwrap().path, "Q:/WebProjects/nomorechat/vendor/atoms");
+        assert_eq!(
+            atoms.local.as_ref().unwrap().path,
+            "Q:/WebProjects/nomorechat/vendor/atoms"
+        );
         let tool = deps.iter().find(|d| d.name == "tool").unwrap();
         assert_eq!(tool.local.as_ref().unwrap().path, "../tool");
-        assert!(tool.local.as_ref().unwrap().origin.contains("devDependencies"));
+        assert!(tool
+            .local
+            .as_ref()
+            .unwrap()
+            .origin
+            .contains("devDependencies"));
         let vue = deps.iter().find(|d| d.name == "vue").unwrap();
         assert!(!vue.is_local());
         assert_eq!(vue.version, "3.5.0");
@@ -856,8 +944,21 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), json).unwrap();
         let deps = parse_package_lock(tmp.path()).unwrap();
-        assert_eq!(deps.iter().find(|d| d.name == "mylib").unwrap().local.as_ref().unwrap().path, "../lib");
-        assert!(!deps.iter().find(|d| d.name == "is-number").unwrap().is_local());
+        assert_eq!(
+            deps.iter()
+                .find(|d| d.name == "mylib")
+                .unwrap()
+                .local
+                .as_ref()
+                .unwrap()
+                .path,
+            "../lib"
+        );
+        assert!(!deps
+            .iter()
+            .find(|d| d.name == "is-number")
+            .unwrap()
+            .is_local());
     }
 
     #[test]
@@ -910,8 +1011,20 @@ mod tests {
             dep("@esbuild/linux-x64", &["linux"], &["x64"], &[], true), // match → keep
             dep("@esbuild/darwin-x64", &["darwin"], &["x64"], &[], true), // skip
             dep("@esbuild/win32-x64", &["win32"], &["x64"], &[], true), // skip
-            dep("@rspack/binding-linux-x64-musl", &["linux"], &["x64"], &["musl"], true), // skip
-            dep("@rspack/binding-linux-x64-gnu", &["linux"], &["x64"], &["glibc"], true), // keep
+            dep(
+                "@rspack/binding-linux-x64-musl",
+                &["linux"],
+                &["x64"],
+                &["musl"],
+                true,
+            ), // skip
+            dep(
+                "@rspack/binding-linux-x64-gnu",
+                &["linux"],
+                &["x64"],
+                &["glibc"],
+                true,
+            ), // keep
         ];
         let kept = filter_for_host(deps, &host).unwrap();
         let names: Vec<&str> = kept.iter().map(|d| d.name.as_str()).collect();
@@ -982,23 +1095,42 @@ mod tests {
     #[test]
     fn nested_installs_keep_their_lockfile_path() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), include_str!("fixtures/nested-installs.package-lock.json")).unwrap();
+        std::fs::write(
+            tmp.path(),
+            include_str!("fixtures/nested-installs.package-lock.json"),
+        )
+        .unwrap();
         let deps = parse_package_lock(tmp.path()).unwrap();
         assert_eq!(deps.len(), 5);
-        let find = |v: &str| deps.iter().find(|d| d.name == "lru-cache" && d.version == v).unwrap();
+        let find = |v: &str| {
+            deps.iter()
+                .find(|d| d.name == "lru-cache" && d.version == v)
+                .unwrap()
+        };
         assert_eq!(find("5.1.1").path, None, "top-level entry has no path");
         assert_eq!(
             find("11.5.2").path.as_deref(),
             Some("node_modules/path-scurry/node_modules/lru-cache")
         );
         let inner = deps.iter().find(|d| d.name == "@scope/inner").unwrap();
-        assert_eq!(inner.path.as_deref(), Some("node_modules/@scope/outer/node_modules/@scope/inner"));
-        assert!(deps.iter().find(|d| d.name == "path-scurry").unwrap().path.is_none());
+        assert_eq!(
+            inner.path.as_deref(),
+            Some("node_modules/@scope/outer/node_modules/@scope/inner")
+        );
+        assert!(deps
+            .iter()
+            .find(|d| d.name == "path-scurry")
+            .unwrap()
+            .path
+            .is_none());
     }
 
     #[test]
     fn pnpm_virtual_store_keys_are_not_nested_installs() {
-        assert_eq!(nested_install_path("node_modules/.pnpm/express@4.18.2/node_modules/express"), None);
+        assert_eq!(
+            nested_install_path("node_modules/.pnpm/express@4.18.2/node_modules/express"),
+            None
+        );
         assert_eq!(nested_install_path("node_modules/express"), None);
         assert_eq!(nested_install_path("packages/lib/node_modules/x"), None);
     }
@@ -1011,10 +1143,22 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), json).unwrap();
         let deps = parse_package_lock(tmp.path()).unwrap();
-        let p = |n: &str, v: &str| deps.iter().find(|d| d.name == n && d.version == v).unwrap().path.clone();
+        let p = |n: &str, v: &str| {
+            deps.iter()
+                .find(|d| d.name == n && d.version == v)
+                .unwrap()
+                .path
+                .clone()
+        };
         assert_eq!(p("a", "1.0.0"), None);
         assert_eq!(p("b", "1.5.0"), None);
-        assert_eq!(p("b", "2.0.0").as_deref(), Some("node_modules/a/node_modules/b"));
-        assert_eq!(p("c", "3.0.0").as_deref(), Some("node_modules/a/node_modules/b/node_modules/c"));
+        assert_eq!(
+            p("b", "2.0.0").as_deref(),
+            Some("node_modules/a/node_modules/b")
+        );
+        assert_eq!(
+            p("c", "3.0.0").as_deref(),
+            Some("node_modules/a/node_modules/b/node_modules/c")
+        );
     }
 }

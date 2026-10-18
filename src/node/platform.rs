@@ -87,7 +87,9 @@ fn current_libc() -> Option<String> {
 fn libc_from_loaders(dirs: &[&str]) -> &'static str {
     let mut musl = false;
     for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
         for e in entries.flatten() {
             let name = e.file_name();
             let name = name.to_string_lossy();
@@ -99,7 +101,11 @@ fn libc_from_loaders(dirs: &[&str]) -> &'static str {
             }
         }
     }
-    if musl { "musl" } else { "glibc" }
+    if musl {
+        "musl"
+    } else {
+        "glibc"
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -114,12 +120,7 @@ fn current_libc() -> Option<String> {
 /// means "must be one of these".
 ///
 /// `os`/`cpu`/`libc` are the package's declared arrays (each may be empty/absent).
-pub fn is_compatible(
-    host: &HostTriple,
-    os: &[String],
-    cpu: &[String],
-    libc: &[String],
-) -> bool {
+pub fn is_compatible(host: &HostTriple, os: &[String], cpu: &[String], libc: &[String]) -> bool {
     list_allows(os, &host.os)
         && list_allows(cpu, &host.cpu)
         // libc only constrains when the host even has a libc notion (Linux).
@@ -210,13 +211,23 @@ mod tests {
     fn musl_libc_skipped_on_glibc_host() {
         let h = host("linux", "x64", Some("glibc"));
         // os+cpu match, but libc=musl on a glibc host → skip
-        assert!(!is_compatible(&h, &v(&["linux"]), &v(&["x64"]), &v(&["musl"])));
+        assert!(!is_compatible(
+            &h,
+            &v(&["linux"]),
+            &v(&["x64"]),
+            &v(&["musl"])
+        ));
     }
 
     #[test]
     fn glibc_libc_kept_on_glibc_host() {
         let h = host("linux", "x64", Some("glibc"));
-        assert!(is_compatible(&h, &v(&["linux"]), &v(&["x64"]), &v(&["glibc"])));
+        assert!(is_compatible(
+            &h,
+            &v(&["linux"]),
+            &v(&["x64"]),
+            &v(&["glibc"])
+        ));
     }
 
     #[test]
@@ -236,7 +247,12 @@ mod tests {
     fn libc_field_ignored_off_linux() {
         // A darwin host has no libc notion; npm ignores a libc field there.
         let h = host("darwin", "arm64", None);
-        assert!(is_compatible(&h, &v(&["darwin"]), &v(&["arm64"]), &v(&["glibc"])));
+        assert!(is_compatible(
+            &h,
+            &v(&["darwin"]),
+            &v(&["arm64"]),
+            &v(&["glibc"])
+        ));
     }
 
     // ── non-linux host parameterized cases ───────────────────────────────────
@@ -262,13 +278,13 @@ mod tests {
         // The live bug: @rspack/binding for 7 platforms, host = linux-x64-glibc.
         let h = host("linux", "x64", Some("glibc"));
         let variants: &[(&[&str], &[&str], &[&str])] = &[
-            (&["linux"], &["x64"], &["musl"]),   // linux-x64-musl   → skip
-            (&["linux"], &["arm64"], &["musl"]), // linux-arm64-musl → skip
-            (&["linux"], &["x64"], &["glibc"]),  // linux-x64-gnu    → KEEP
-            (&["darwin"], &["x64"], &[]),        // darwin-x64       → skip
-            (&["win32"], &["x64"], &[]),         // win32-x64        → skip
-            (&["linux"], &["arm64"], &["glibc"]),// linux-arm64-gnu  → skip
-            (&["darwin"], &["arm64"], &[]),      // darwin-arm64     → skip
+            (&["linux"], &["x64"], &["musl"]),    // linux-x64-musl   → skip
+            (&["linux"], &["arm64"], &["musl"]),  // linux-arm64-musl → skip
+            (&["linux"], &["x64"], &["glibc"]),   // linux-x64-gnu    → KEEP
+            (&["darwin"], &["x64"], &[]),         // darwin-x64       → skip
+            (&["win32"], &["x64"], &[]),          // win32-x64        → skip
+            (&["linux"], &["arm64"], &["glibc"]), // linux-arm64-gnu  → skip
+            (&["darwin"], &["arm64"], &[]),       // darwin-arm64     → skip
         ];
         let kept: Vec<bool> = variants
             .iter()
