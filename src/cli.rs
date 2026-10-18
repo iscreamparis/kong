@@ -63,6 +63,10 @@ pub struct RulesCmd {
     /// Default: .python-version, else pyproject `requires-python`, else latest.
     #[arg(long)]
     pub python: Option<String>,
+
+    /// Re-resolve git dependencies to the remote's current commit (default: keep the commits recorded in kong.rules)
+    #[arg(long)]
+    pub update_git: bool,
 }
 
 #[derive(Parser)]

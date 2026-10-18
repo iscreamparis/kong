@@ -98,6 +98,13 @@ fn maybe_install_cli() {
 }
 
 fn main() -> Result<()> {
+    // Git dependencies need machine credentials and a build step, which live in
+    // `gitdep`; `node::git` only sees them through these hooks (tests pass them as values).
+    node::git::install_hooks(node::git::GitHooks {
+        git_env: gitdep::auth::machine_git_env,
+        build: Some(gitdep::build::run_build),
+    });
+
     #[cfg(target_os = "macos")]
     maybe_install_cli();
 
@@ -195,7 +202,15 @@ fn main() -> Result<()> {
         Commands::Rules(cmd) => {
             let project_dir = cmd.path.unwrap_or_else(|| std::env::current_dir().unwrap());
             info!(path = %project_dir.display(), "Generating kong.rules");
-            let rules = config::generate_rules_with_python(&project_dir, cmd.force, cmd.name, cmd.python.as_deref())?;
+            let rules = config::generate_rules_with_options(
+                &project_dir,
+                &config::RulesOptions {
+                    force: cmd.force,
+                    name: cmd.name,
+                    python: cmd.python,
+                    update_git: cmd.update_git,
+                },
+            )?;
             let rules_path = project_dir.join("kong.rules");
             config::write_rules(&rules, &rules_path)?;
             info!(path = %rules_path.display(), "kong.rules written");
