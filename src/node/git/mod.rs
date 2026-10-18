@@ -2,6 +2,7 @@
 //! `<store>/node/git`, then linked into projects by `kong use`.
 
 pub mod fetch;
+pub mod install;
 pub mod spec;
 
 #[cfg(test)]
