@@ -141,8 +141,74 @@ pub fn rust_targets_for(req: &BuildRequest) -> Vec<String> {
     targets
 }
 
-pub fn build_tools_for(_req: &BuildRequest) -> Result<BuildTools> {
-    bail!("gitdep::build::build_tools_for is not implemented yet")
+/// The Kong-managed tools a build step runs with (shared §4).
+///
+/// A git dependency's build (wasm-pack, cargo, npm scripts) must not depend on what
+/// the host happens to have installed, so the Kong Rust toolchain (plus every extra
+/// target the dependency asks for) and the Kong Node runtime come first on PATH, and
+/// cargo state goes to one CARGO_HOME shared by every build step in the store.
+pub fn build_tools_for(req: &BuildRequest) -> Result<BuildTools> {
+    let rust = crate::rust_eco::runtime::ensure_runtime(&req.store_root)
+        .context("failed to prepare the Kong Rust toolchain")?;
+    for target in rust_targets_for(req) {
+        crate::rust_eco::runtime::ensure_target(&req.store_root, &rust, &target)?;
+    }
+    let toolchain = req.store_root.join(&rust.store_path);
+    let rustc = crate::rust_eco::runtime::rustc_exe_in(&toolchain).with_context(|| {
+        format!(
+            "rustc not found in the Kong Rust toolchain {}",
+            toolchain.display()
+        )
+    })?;
+
+    let node = crate::node::runtime::ensure_runtime(&req.store_root, "lts")
+        .context("failed to prepare the Kong Node runtime")?;
+    // node lives in `bin/` on Unix and at the runtime root on Windows: its parent
+    // is the directory that also holds npm/npx.
+    let node_dir = node
+        ._node_exe
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| req.store_root.join(&node.store_path));
+
+    let cargo_home = req.store_root.join("node").join("git").join(".cargo-home");
+    fs::create_dir_all(&cargo_home)
+        .with_context(|| format!("Failed to create {}", cargo_home.display()))?;
+
+    let path_prepend = prepend_order(&toolchain, &cargo_home, &node_dir, req.lock_dir.as_deref());
+    debug!(pkg = %req.name, rust = %rust.version, node = %node.version,
+        cargo_home = %cargo_home.display(), "Build tools for {} prepared", req.name);
+    Ok(BuildTools {
+        path_prepend,
+        env: vec![
+            (
+                "CARGO_HOME".to_string(),
+                cargo_home.to_string_lossy().into_owned(),
+            ),
+            ("RUSTC".to_string(), rustc.to_string_lossy().into_owned()),
+        ],
+        rust_version: Some(rust.version),
+    })
+}
+
+/// PATH order of shared §4: the toolchain first (its cargo/rustc win), then binaries
+/// installed with `cargo install` into the shared CARGO_HOME, then node, then the
+/// dependency's own `node_modules/.bin`.
+fn prepend_order(
+    toolchain: &Path,
+    cargo_home: &Path,
+    node_dir: &Path,
+    lock_dir: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut dirs = vec![
+        toolchain.join("bin"),
+        cargo_home.join("bin"),
+        node_dir.to_path_buf(),
+    ];
+    if let Some(lock_dir) = lock_dir {
+        dirs.push(lock_dir.join("node_modules").join(".bin"));
+    }
+    dirs
 }
 
 /// Run the build step of one git dependency at one commit, at most once.
@@ -254,8 +320,21 @@ pub fn run_build_with(req: &BuildRequest, tools: &BuildTools) -> Result<BuildRec
     })
 }
 
-pub fn run_build(_req: &BuildRequest) -> Result<BuildRecord> {
-    bail!("gitdep::build::run_build is not implemented yet")
+/// The production `BuildFn`: prepare the Kong tools, then build.
+///
+/// A toolchain or runtime failure is reported in the shared §6 shape so the user
+/// sees which dependency needed those tools.
+pub fn run_build(req: &BuildRequest) -> Result<BuildRecord> {
+    let tools = build_tools_for(req).map_err(|e| {
+        build_error(
+            req,
+            "build tools could not be prepared",
+            &[("error", format!("{e:#}"))],
+            "the build step needs the Kong-managed Rust toolchain and Node runtime; check network access to static.rust-lang.org and nodejs.org, then run `kong rules` again",
+            None,
+        )
+    })?;
+    run_build_with(req, &tools)
 }
 
 enum Acquired {
@@ -568,6 +647,27 @@ mod tests {
             "the build ran after removing the stale lock"
         );
         assert!(!lock.exists());
+    }
+
+    #[test]
+    fn prepend_order_follows_shared_section_4() {
+        let dirs = prepend_order(
+            Path::new("/s/rust/toolchain/1.0.0"),
+            Path::new("/s/node/git/.cargo-home"),
+            Path::new("/s/node/runtime/22/bin"),
+            Some(Path::new("/c/src/pkg")),
+        );
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("/s/rust/toolchain/1.0.0/bin"),
+                PathBuf::from("/s/node/git/.cargo-home/bin"),
+                PathBuf::from("/s/node/runtime/22/bin"),
+                PathBuf::from("/c/src/pkg/node_modules/.bin"),
+            ]
+        );
+        let without_lock = prepend_order(Path::new("/t"), Path::new("/h"), Path::new("/n"), None);
+        assert_eq!(without_lock.len(), 3);
     }
 
     #[test]
