@@ -8,6 +8,10 @@ and KONG adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Offline Cargo registry and shared build cache.** `kong use` vendors the crates of `Cargo.lock` from
+  the store, points Cargo at them with a per-env `CARGO_HOME`, and shares one `CARGO_TARGET_DIR` between
+  worktrees with the same lockfile. New `kong env` prints the variables (`eval "$(kong env)"`; PowerShell
+  `kong env --shell ps1`). Without network, `kong rules` falls back to the newest toolchain in the store.
 - **Git dependencies (`kong.git`).** A npm git spec named in a `kong.git` block of `package.json` is
   cloned once per commit into the store (`node/git/<repo>/<commit12>/`), its own dependencies are
   installed from its `package-lock.json`, and `kong use` links it at `node_modules/<name>`. Recorded
@@ -24,6 +28,13 @@ and KONG adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`kong solidify` / `kong eject`** handle git dependencies: solidify copies them as real
   directories with build output and their own `node_modules`; eject removes commit dirs used only by
   the project.
+
+### Changed
+- `Cargo.lock` is now committed.
+- `kong.rules` Rust entries record the `Cargo.lock` checksum, workspace members and lock hash (projects
+  without `Cargo.lock` are unchanged).
+- `kong use` no longer writes into `store/rust/registry`; `CARGO_TARGET_DIR` points at the shared cache.
+- The proof scripts no longer run `cargo fetch`.
 
 ## [0.8.7] — 2026-10-12
 

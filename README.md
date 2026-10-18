@@ -330,6 +330,36 @@ lockfile, optionally gets a build step, and is linked at `node_modules/<name>`.
 - **Limits:** the dependency's own dependencies come from its `package-lock.json` only; no `#semver:`;
   full 40-hex commits only (no abbreviations); the repository is never modified.
 
+### Rust: warm registry and build cache
+
+For a Rust project with a committed `Cargo.lock`, `kong use` makes Cargo build offline with no `cargo fetch`:
+
+```bash
+kong rules && kong use
+eval "$(kong env)"                          # PowerShell: kong env --shell ps1 | Invoke-Expression
+cargo build --offline                       # and cargo test --offline
+```
+
+- **Variables.** `kong env` prints the exports; the generated `cargo` wrapper in `.rust-toolchain/bin` sets the same ones.
+  `CARGO_HOME` is per environment; its `config.toml` replaces crates-io with the vendored directory and sets
+  `net.offline = true`. `CARGO_TARGET_DIR` is the shared build cache, `CARGO_NET_OFFLINE=true`,
+  `RUSTC_WORKSPACE_WRAPPER` is the per-env wrapper, and `PATH` gets the toolchain `bin` first. Nothing is
+  written into the repository: no `.cargo/config.toml` and no `target/` in the project.
+- **Layout.**
+  - `<cache>/cargo-vendor/<key>/`: directory registry, hard links from `store/rust/crates`, checksums taken from `Cargo.lock`.
+  - `<cache>/cargo-target/<key>/`: shared target dir, keyed by workspace members + `Cargo.lock` hash + toolchain + host.
+    Feature sets coexist through Cargo's own metadata hash.
+  - `<RULEZ>/<project>/cargo/{home,bin,incremental,env.sh,env.ps1}`: the per-env part.
+- **Sharing.** Dependency artifacts are reused by every worktree with the same lockfile. The project's own
+  crates and the incremental dirs stay per worktree (the wrapper path is per env).
+- **Sandbox / read-only store.** The store may be read-only. Only two places must be writable: the RULEZ env
+  dir and the cache root. The cache root is `KONG_CACHE`, else `<install root>/cache`, else
+  `<tmp>/kong-cache`, chosen automatically with a warning. Without network, `kong rules` reuses the newest
+  Rust toolchain already in the store.
+- **Limits.** crates.io dependencies only (git/path dependencies in `Cargo.lock` are not vendored).
+  `CARGO_HOME` is per env, so `~/.cargo/config.toml` is not read. Timing evidence:
+  `docs/measurements/cargo-warm/timings.txt`, written by `scripts/measure/cargo-warm.sh`.
+
 ---
 
 ## The Store
