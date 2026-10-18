@@ -101,6 +101,36 @@ pub struct NodeSection {
     /// kong.rules ignores the field (no `deny_unknown_fields`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub local: Vec<LocalPackageEntry>,
+    /// Git dependencies declared through `kong.git`. Omitted when empty, so
+    /// kong.rules stays byte-identical for projects without `kong.git`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub git: Vec<GitPackageEntry>,
+}
+
+/// A Node dependency cloned from git into the store and linked in place.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitPackageEntry {
+    pub name: String,
+    pub version: String,
+    pub source: String,
+    pub repo: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    pub commit: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rust_targets: Vec<String>,
+    pub declared_by: String,
+    pub store_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<PackageEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local: Vec<LocalPackageEntry>,
 }
 
 /// A local Node package linked (not copied) into `node_modules/<name>`.
@@ -147,7 +177,7 @@ pub struct RustSection {
     pub packages: Vec<PackageEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PackageEntry {
     pub name: String,
     pub version: String,
@@ -288,6 +318,41 @@ pub fn resolve_project_name(project_dir: &Path) -> String {
     path_slug(project_dir)
 }
 
+/// One registry package of the Node lockfile: downloaded into the store when
+/// missing (or `force`), otherwise only recorded.
+pub(crate) fn node_package_entry(
+    dep: &crate::node::parser::NodeDep,
+    store_root: &Path,
+    force: bool,
+) -> Result<PackageEntry> {
+    let safe_name = dep.name.replace('/', "+");
+    let store_path = format!("node/libs/{}-{}", safe_name, dep.version);
+    let full_store_path = store_root.join(&store_path);
+    if !full_store_path.exists() || force {
+        let file_info = crate::node::client::fetch_and_download(
+            &dep.name, &dep.version, &full_store_path,
+        )?;
+        Ok(PackageEntry {
+            name: dep.name.clone(),
+            version: dep.version.clone(),
+            hash: Some(file_info.hash),
+            store_path,
+            source_url: Some(file_info.url),
+            path: dep.path.clone(),
+        })
+    } else {
+        debug!(pkg = %dep.name, ver = %dep.version, "Already in store, skipping");
+        Ok(PackageEntry {
+            name: dep.name.clone(),
+            version: dep.version.clone(),
+            hash: None,
+            store_path,
+            source_url: None,
+            path: dep.path.clone(),
+        })
+    }
+}
+
 // ── Rules generation ────────────────────────────────────────────────────────
 
 pub fn generate_rules(project_dir: &Path, force: bool, name: Option<String>) -> Result<KongRules> {
@@ -302,6 +367,31 @@ pub fn generate_rules_with_python(
     name: Option<String>,
     python: Option<&str>,
 ) -> Result<KongRules> {
+    generate_rules_with_options(
+        project_dir,
+        &RulesOptions {
+            force,
+            name,
+            python: python.map(str::to_string),
+            update_git: false,
+        },
+    )
+}
+
+/// Options of `generate_rules_with_options`.
+#[derive(Debug, Clone, Default)]
+pub struct RulesOptions {
+    pub force: bool,
+    pub name: Option<String>,
+    pub python: Option<String>,
+    /// Re-resolve git dependencies against the remote (`--update-git`).
+    pub update_git: bool,
+}
+
+pub fn generate_rules_with_options(project_dir: &Path, opts: &RulesOptions) -> Result<KongRules> {
+    let force = opts.force;
+    let name = opts.name.clone();
+    let python = opts.python.as_deref();
     // The env-location key. An explicit `--name` always wins; otherwise we derive
     // a stable, path-unique slug so that two folders sharing a basename (e.g.
     // `~/CRM-master/crm-backend` vs `~/CRM-erd/crm-backend`) never collide on one
@@ -467,35 +557,10 @@ pub fn generate_rules_with_python(
                 local.push(local_entry_for(project_dir, &dep.name, src)?);
                 continue;
             }
-            let safe_name = dep.name.replace('/', "+");
-            let store_path = format!("node/libs/{}-{}", safe_name, dep.version);
-            let full_store_path = store_root.join(&store_path);
-            if !full_store_path.exists() || force {
-                let file_info = crate::node::client::fetch_and_download(
-                    &dep.name, &dep.version, &full_store_path,
-                )?;
-                packages.push(PackageEntry {
-                    name: dep.name.clone(),
-                    version: dep.version.clone(),
-                    hash: Some(file_info.hash),
-                    store_path,
-                    source_url: Some(file_info.url),
-                    path: dep.path.clone(),
-                });
-            } else {
-                debug!(pkg = %dep.name, ver = %dep.version, "Already in store, skipping");
-                packages.push(PackageEntry {
-                    name: dep.name.clone(),
-                    version: dep.version.clone(),
-                    hash: None,
-                    store_path,
-                    source_url: None,
-                    path: dep.path.clone(),
-                });
-            }
+            packages.push(node_package_entry(dep, &store_root, force)?);
         }
         let entry = RuntimeEntry { version: runtime.version, store_path: runtime.store_path };
-        (Some(entry), Some(NodeSection { packages, local }))
+        (Some(entry), Some(NodeSection { packages, local, git: Vec::new() }))
     } else {
         (None, None)
     };
@@ -894,11 +959,77 @@ mod tests {
 
     #[test]
     fn node_section_without_local_serializes_like_before() {
-        let s = NodeSection { packages: vec![], local: vec![] };
+        let s = NodeSection { packages: vec![], local: vec![], git: vec![] };
         assert_eq!(serde_json::to_string(&s).unwrap(), r#"{"packages":[]}"#);
         // …and an old kong.rules (no `local`) still reads.
         let back: NodeSection = serde_json::from_str(r#"{"packages":[]}"#).unwrap();
         assert!(back.local.is_empty());
+    }
+
+    #[test]
+    fn node_section_without_git_serializes_and_reads_like_before() {
+        let s = NodeSection { packages: vec![], local: vec![], git: vec![] };
+        assert_eq!(serde_json::to_string(&s).unwrap(), r#"{"packages":[]}"#);
+        let back: NodeSection =
+            serde_json::from_str(r#"{"packages":[],"local":[]}"#).unwrap();
+        assert!(back.git.is_empty());
+    }
+
+    #[test]
+    fn git_package_entry_round_trips() {
+        let pkg = PackageEntry {
+            name: "is-fixture".into(),
+            version: "1.0.0".into(),
+            hash: None,
+            store_path: "node/libs/is-fixture-1.0.0".into(),
+            source_url: None,
+            path: Some("node_modules/is-fixture".into()),
+        };
+        let local = LocalPackageEntry {
+            name: "@fx/util".into(),
+            version: "0.1.0".into(),
+            path: "../util".into(),
+        };
+        let full = GitPackageEntry {
+            name: "@etcito/raa".into(),
+            version: "0.3.0".into(),
+            source: "github:Etcito/raa#v0.3.0".into(),
+            repo: "https://github.com/Etcito/raa.git".into(),
+            reference: Some("v0.3.0".into()),
+            commit: "a".repeat(40),
+            path: "packages/raa".into(),
+            build: Some("scripts/build-package.sh".into()),
+            rust_targets: vec!["wasm32-unknown-unknown".into()],
+            declared_by: "apps/web/package.json".into(),
+            store_path: "node/git/raa-1a2b3c4d/aaaaaaaaaaaa".into(),
+            lock_dir: Some("packages/raa".into()),
+            packages: vec![pkg],
+            local: vec![local],
+        };
+        let json = serde_json::to_string(&full).unwrap();
+        assert_eq!(serde_json::from_str::<GitPackageEntry>(&json).unwrap(), full);
+
+        let min = GitPackageEntry {
+            name: "x".into(),
+            version: "0.0.0".into(),
+            source: "git+file:///r".into(),
+            repo: "file:///r".into(),
+            reference: None,
+            commit: "b".repeat(40),
+            path: String::new(),
+            build: None,
+            rust_targets: vec![],
+            declared_by: "package.json".into(),
+            store_path: "node/git/r-00000000/bbbbbbbbbbbb".into(),
+            lock_dir: None,
+            packages: vec![],
+            local: vec![],
+        };
+        let json = serde_json::to_string(&min).unwrap();
+        for k in ["reference", "\"path\"", "build", "rust_targets", "lock_dir", "packages", "local"] {
+            assert!(!json.contains(k), "{k} present in {json}");
+        }
+        assert_eq!(serde_json::from_str::<GitPackageEntry>(&json).unwrap(), min);
     }
 
     #[test]

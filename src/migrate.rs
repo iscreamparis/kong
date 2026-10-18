@@ -388,7 +388,7 @@ fn adopt_node(project_dir: &Path, store_root: &Path) -> Result<Option<NodeSectio
     if packages.is_empty() {
         return Ok(None);
     }
-    Ok(Some(NodeSection { packages, local: Vec::new() }))
+    Ok(Some(NodeSection { packages, local: Vec::new(), git: Vec::new() }))
 }
 
 /// Copy one installed Node package into the store under the `package/`

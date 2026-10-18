@@ -417,6 +417,7 @@ mod tests {
         let node = NodeSection {
             packages: vec![],
             local: vec![local("@real3d/atoms", "../vendor/atoms")],
+            git: vec![],
         };
         let store = tempfile::TempDir::new().unwrap();
         build_node_modules(&env, &app, &node, store.path()).unwrap();
@@ -454,6 +455,7 @@ mod tests {
         let node = NodeSection {
             packages: vec![],
             local: vec![local("@real3d/atoms", "../vendor/atoms")],
+            git: vec![],
         };
         build_node_modules(&env, &app, &node, store.path()).unwrap();
         build_node_modules(&env, &app, &node, store.path()).unwrap(); // twice: no error
@@ -470,6 +472,7 @@ mod tests {
         let moved = NodeSection {
             packages: vec![],
             local: vec![local("@real3d/atoms", "../CRM_Atoms")],
+            git: vec![],
         };
         build_node_modules(&env, &app, &moved, store.path()).unwrap();
         let dst = env.join("node_modules").join("@real3d").join("atoms");
@@ -490,6 +493,7 @@ mod tests {
         let node = NodeSection {
             packages: vec![],
             local: vec![local("@real3d/atoms", "../nowhere/atoms")],
+            git: vec![],
         };
         let err = build_node_modules(&env, &app, &node, store.path()).unwrap_err();
         let msg = format!("{err:#}");
@@ -505,6 +509,7 @@ mod tests {
         let node = NodeSection {
             packages: vec![],
             local: vec![local("@real3d/atoms", "../vendor/atoms")],
+            git: vec![],
         };
         build_node_modules(&env, &app, &node, store.path()).unwrap();
         link::clean_environments(&env, false).unwrap();
@@ -593,6 +598,7 @@ mod tests {
             let node = NodeSection {
                 packages: perm.iter().map(|&i| base[i].clone()).collect(),
                 local: vec![],
+                git: vec![],
             };
             build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
             assert_eq!(
@@ -629,6 +635,7 @@ mod tests {
                 ),
             ],
             local: vec![],
+            git: vec![],
         };
         build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
         assert_eq!(
@@ -648,6 +655,7 @@ mod tests {
         let node = NodeSection {
             packages: nested_packages(store.path()),
             local: vec![],
+            git: vec![],
         };
         let before = tree(store.path());
         build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
@@ -674,6 +682,7 @@ mod tests {
         let mut old = NodeSection {
             packages: vec![pkgs[0].clone(), pkgs[1].clone()],
             local: vec![],
+            git: vec![],
         };
         old.packages[1].path = None;
         build_node_modules(env.path(), env.path(), &old, store.path()).unwrap();
@@ -682,6 +691,7 @@ mod tests {
         let node = NodeSection {
             packages: pkgs,
             local: vec![],
+            git: vec![],
         };
         build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
         assert_eq!(version_at(env.path(), "node_modules/lru-cache"), "5.1.1");
