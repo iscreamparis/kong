@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod download;
 mod extract;
+mod gitdep;
 #[cfg(feature = "gui")]
 mod gui;
 mod link;
