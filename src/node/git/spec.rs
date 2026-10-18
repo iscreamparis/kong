@@ -151,6 +151,91 @@ pub fn is_full_commit(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// The `kong.git.<name>` block of a package.json, validated and normalised.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct KongGitEntry {
+    pub path: String,
+    pub build: Option<String>,
+    pub rust_targets: Vec<String>,
+}
+
+/// Validate one `kong.git` entry strictly, so a typo such as `buidl` fails loudly
+/// instead of silently skipping the build step.
+pub fn parse_kong_git_entry(
+    name: &str,
+    value: &serde_json::Value,
+    manifest: &str,
+) -> Result<KongGitEntry> {
+    let fail = |key: &str, problem: String| {
+        anyhow::anyhow!(
+            "git dependency '{name}' has an invalid kong.git entry:\n  \
+             declared by : {manifest} (kong.git \"{name}\")\n  \
+             key         : {key}\n  \
+             problem     : {problem}\n\
+             Allowed keys are \"path\" (string), \"build\" (non-empty string) and \
+             \"rustTargets\" (array of strings)."
+        )
+    };
+    let Some(obj) = value.as_object() else {
+        return Err(fail(
+            "(entry)",
+            format!("expected an object, found {value}"),
+        ));
+    };
+    let mut entry = KongGitEntry::default();
+    for (key, v) in obj {
+        match key.as_str() {
+            "path" => {
+                let p = v
+                    .as_str()
+                    .ok_or_else(|| fail(key, format!("expected a string, found {v}")))?;
+                entry.path = normalize_subdir(p).map_err(|e| fail(key, e.to_string()))?;
+            }
+            "build" => match v.as_str() {
+                Some(b) if !b.trim().is_empty() => entry.build = Some(b.to_owned()),
+                _ => return Err(fail(key, format!("expected a non-empty string, found {v}"))),
+            },
+            "rustTargets" => {
+                let arr = v
+                    .as_array()
+                    .ok_or_else(|| fail(key, format!("expected an array of strings, found {v}")))?;
+                for t in arr {
+                    let t = t.as_str().ok_or_else(|| {
+                        fail(
+                            key,
+                            format!("expected an array of strings, found element {t}"),
+                        )
+                    })?;
+                    entry.rust_targets.push(t.to_owned());
+                }
+            }
+            _ => return Err(fail(key, "unknown key".to_owned())),
+        }
+    }
+    Ok(entry)
+}
+
+/// Normalise a sub-directory inside the checkout to a relative `/` path, and refuse
+/// anything that could escape the checkout or mean different things per OS.
+pub fn normalize_subdir(p: &str) -> Result<String> {
+    let p = p.replace('\\', "/");
+    if p.contains(':') {
+        bail!("path '{p}' must not contain ':' (absolute Windows paths are not allowed)");
+    }
+    if p.starts_with('/') {
+        bail!("path '{p}' must be relative to the repository root");
+    }
+    let mut parts = Vec::new();
+    for seg in p.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => bail!("path '{p}' must not contain a '..' segment"),
+            s => parts.push(s),
+        }
+    }
+    Ok(parts.join("/"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +303,57 @@ mod tests {
             Some(full)
         );
         assert_eq!(build_key("echo hi").len(), 12);
+    }
+
+    #[test]
+    fn normalizes_subdirs() {
+        assert_eq!(
+            normalize_subdir("./packages/core/").unwrap(),
+            "packages/core"
+        );
+        assert_eq!(normalize_subdir("packages\\core").unwrap(), "packages/core");
+        assert_eq!(normalize_subdir("././a/./b").unwrap(), "a/b");
+        assert_eq!(normalize_subdir("").unwrap(), "");
+        assert_eq!(normalize_subdir(".").unwrap(), "");
+        for bad in ["../x", "a/../b", "/abs", "C:/x", "C:\\x", "a:b"] {
+            assert!(normalize_subdir(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn parses_and_rejects_kong_git_entries() {
+        use serde_json::json;
+        let m = "apps/web/package.json";
+        let e = parse_kong_git_entry(
+            "@etcito/raa",
+            &json!({"path": "./packages/raa/", "build": "scripts/b.sh", "rustTargets": ["wasm32-unknown-unknown"]}),
+            m,
+        )
+        .unwrap();
+        assert_eq!(e.path, "packages/raa");
+        assert_eq!(e.build.as_deref(), Some("scripts/b.sh"));
+        assert_eq!(e.rust_targets, vec!["wasm32-unknown-unknown"]);
+        assert_eq!(
+            parse_kong_git_entry("x", &json!({}), m).unwrap(),
+            KongGitEntry::default()
+        );
+
+        let err = parse_kong_git_entry("@etcito/raa", &json!({"buidl": "x"}), m)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("@etcito/raa") && err.contains(m) && err.contains("buidl"),
+            "{err}"
+        );
+        for bad in [
+            json!({"build": ""}),
+            json!({"rustTargets": "wasm32-unknown-unknown"}),
+            json!({"rustTargets": [1]}),
+            json!({"path": 3}),
+            json!({"path": "../x"}),
+            json!("packages/core"),
+        ] {
+            assert!(parse_kong_git_entry("x", &bad, m).is_err(), "{bad}");
+        }
     }
 }
