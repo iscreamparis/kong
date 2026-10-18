@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 const CHANNEL_URL: &str = "https://static.rust-lang.org/dist/channel-rust-stable.toml";
 
@@ -17,9 +17,35 @@ pub struct RustRuntime {
 
 /// Ensure the stable Rust toolchain is present in the store.
 /// Downloads cargo, rustc, and rust-std components and merges them into one directory.
+///
+/// Offline fallback: when the stable channel manifest is unreachable (network blocked)
+/// or the newer stable cannot be downloaded (read-only store), the newest toolchain
+/// already in the store is used instead, so Rust projects keep working offline.
 pub fn ensure_runtime(store_root: &Path) -> Result<RustRuntime> {
-    let target = rust_target();
-    let (version, cargo_url, rustc_url, std_url) = resolve_components(&target)?;
+    ensure_runtime_with(store_root, resolve_components)
+}
+
+/// `ensure_runtime` with the component resolver injected, so tests can simulate an
+/// unreachable channel manifest without any network.
+fn ensure_runtime_with(
+    store_root: &Path,
+    resolve: impl FnOnce(&str) -> Result<(String, String, String, String)>,
+) -> Result<RustRuntime> {
+    let target = host_target();
+    let (version, cargo_url, rustc_url, std_url) = match resolve(&target) {
+        Ok(components) => components,
+        Err(e) => {
+            if let Some(rt) = newest_store_toolchain(store_root) {
+                warn!(version = %rt.version, error = %format!("{e:#}"),
+                    "Rust channel unreachable, using newest toolchain in store");
+                return Ok(rt);
+            }
+            return Err(e).context(
+                "Rust channel unreachable and no toolchain in the store \
+                 (channel manifest: static.rust-lang.org)",
+            );
+        }
+    };
 
     let store_path = format!("rust/toolchain/{version}");
     let toolchain_dir = store_root.join(&store_path);
@@ -31,13 +57,27 @@ pub fn ensure_runtime(store_root: &Path) -> Result<RustRuntime> {
         debug!(version = %version, "Rust toolchain already in store");
     } else {
         info!(version = %version, target = %target, "Downloading Rust toolchain");
-        std::fs::create_dir_all(&toolchain_dir)?;
-        download_component(&cargo_url, &toolchain_dir, "cargo")
-            .context("failed to download cargo component")?;
-        download_component(&rustc_url, &toolchain_dir, "rustc")
-            .context("failed to download rustc component")?;
-        download_component(&std_url, &toolchain_dir, "rust-std")
-            .context("failed to download rust-std component")?;
+        let downloaded = (|| -> Result<()> {
+            std::fs::create_dir_all(&toolchain_dir)?;
+            download_component(&cargo_url, &toolchain_dir, "cargo")
+                .context("failed to download cargo component")?;
+            download_component(&rustc_url, &toolchain_dir, "rustc")
+                .context("failed to download rustc component")?;
+            download_component(&std_url, &toolchain_dir, "rust-std")
+                .context("failed to download rust-std component")?;
+            Ok(())
+        })();
+        if let Err(e) = downloaded {
+            if let Some(rt) = newest_store_toolchain(store_root) {
+                warn!(version = %rt.version, wanted = %version, error = %format!("{e:#}"),
+                    "Rust toolchain {version} download failed — using the toolchain already in the store");
+                return Ok(rt);
+            }
+            return Err(e).with_context(|| {
+                format!("cannot download Rust toolchain {version} from static.rust-lang.org \
+                         and no toolchain is in the store")
+            });
+        }
     }
 
     let cargo_exe = cargo_exe_in(&toolchain_dir)
@@ -47,6 +87,36 @@ pub fn ensure_runtime(store_root: &Path) -> Result<RustRuntime> {
 
     info!(version = %version, cargo = %cargo_exe.display(), "Rust toolchain ready");
     Ok(RustRuntime { version, store_path, _cargo_exe: cargo_exe, _rustc_exe: rustc_exe })
+}
+
+/// The newest complete toolchain (both cargo and rustc present) under
+/// `<store>/rust/toolchain/`, compared numerically per dot component
+/// (1.90.0 > 1.9.0 > 1.85.0). Directories whose name is not a semver `X.Y.Z` are ignored.
+/// Never uses the network: this is the offline fallback of `ensure_runtime`.
+pub fn newest_store_toolchain(store_root: &Path) -> Option<RustRuntime> {
+    let base = store_root.join("rust").join("toolchain");
+    let mut best: Option<(Vec<u64>, String, PathBuf, PathBuf)> = None;
+    for entry in std::fs::read_dir(&base).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(key) = numeric_version(&name) else { continue };
+        let dir = entry.path();
+        let (Some(cargo), Some(rustc)) = (cargo_exe_in(&dir), rustc_exe_in(&dir)) else { continue };
+        if best.as_ref().map_or(true, |(k, ..)| key > *k) {
+            best = Some((key, name, cargo, rustc));
+        }
+    }
+    best.map(|(_, version, cargo, rustc)| RustRuntime {
+        store_path: format!("rust/toolchain/{version}"),
+        version,
+        _cargo_exe: cargo,
+        _rustc_exe: rustc,
+    })
+}
+
+/// "1.90.0" -> [1, 90, 0]; None unless the name is exactly three numeric components.
+fn numeric_version(name: &str) -> Option<Vec<u64>> {
+    let parts: Option<Vec<u64>> = name.split('.').map(|c| c.parse::<u64>().ok()).collect();
+    parts.filter(|p| p.len() == 3)
 }
 
 /// Ensure the std library for an extra compilation `target` is merged into the
@@ -190,8 +260,8 @@ fn download_component(url: &str, dest: &Path, component: &str) -> Result<()> {
     Ok(())
 }
 
-/// The Rust target triple for the current platform.
-fn rust_target() -> String {
+/// The Rust target triple for the current platform (the host toolchain's triple).
+pub fn host_target() -> String {
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     return "x86_64-pc-windows-msvc".to_string();
 
@@ -231,8 +301,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rust_target_is_nonempty() {
-        assert!(!rust_target().is_empty());
+    fn host_target_is_nonempty() {
+        assert!(!host_target().is_empty());
     }
 
     #[test]
@@ -249,5 +319,83 @@ mod tests {
         };
         // The version 1.0.0 manifest is never fetched: the target dir is already there.
         ensure_target(store.path(), &runtime, "wasm32-unknown-unknown").unwrap();
+    }
+
+    /// Create a fake toolchain dir `rust/toolchain/<version>` with the given bin files.
+    fn seed_toolchain(store: &Path, version: &str, cargo: bool, rustc: bool) {
+        let bin = store.join("rust/toolchain").join(version).join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let ext = if cfg!(windows) { ".exe" } else { "" };
+        if cargo {
+            std::fs::write(bin.join(format!("cargo{ext}")), b"").unwrap();
+        }
+        if rustc {
+            std::fs::write(bin.join(format!("rustc{ext}")), b"").unwrap();
+        }
+    }
+
+    fn failing_resolver(_: &str) -> Result<(String, String, String, String)> {
+        anyhow::bail!("simulated: channel manifest unreachable")
+    }
+
+    #[test]
+    fn store_scan_picks_newest_numeric_version() {
+        let store = tempfile::TempDir::new().unwrap();
+        seed_toolchain(store.path(), "1.85.0", true, true);
+        seed_toolchain(store.path(), "1.9.0", true, true);
+        seed_toolchain(store.path(), "1.90.0", true, true);
+        seed_toolchain(store.path(), "1.99.0", true, false); // missing bin/rustc
+        std::fs::create_dir_all(store.path().join("rust/toolchain/stable/bin")).unwrap();
+        let rt = newest_store_toolchain(store.path()).unwrap();
+        assert_eq!(rt.version, "1.90.0");
+        assert_eq!(rt.store_path, "rust/toolchain/1.90.0");
+        assert!(rt._rustc_exe.exists());
+    }
+
+    #[test]
+    fn store_scan_compares_numerically_and_skips_non_semver() {
+        let store = tempfile::TempDir::new().unwrap();
+        seed_toolchain(store.path(), "1.9.0", true, true);
+        seed_toolchain(store.path(), "1.10.0", true, true);
+        seed_toolchain(store.path(), "nightly", true, true);
+        seed_toolchain(store.path(), "2.0", true, true); // not X.Y.Z
+        let rt = newest_store_toolchain(store.path()).unwrap();
+        assert_eq!(rt.version, "1.10.0");
+    }
+
+    #[test]
+    fn store_scan_skips_version_without_cargo() {
+        let store = tempfile::TempDir::new().unwrap();
+        seed_toolchain(store.path(), "1.80.0", true, true);
+        seed_toolchain(store.path(), "1.81.0", false, true); // missing bin/cargo
+        let rt = newest_store_toolchain(store.path()).unwrap();
+        assert_eq!(rt.version, "1.80.0");
+    }
+
+    #[test]
+    fn store_scan_empty_store_is_none() {
+        let store = tempfile::TempDir::new().unwrap();
+        assert!(newest_store_toolchain(store.path()).is_none());
+    }
+
+    #[test]
+    fn unreachable_manifest_falls_back_to_store_toolchain() {
+        let store = tempfile::TempDir::new().unwrap();
+        seed_toolchain(store.path(), "1.85.0", true, true);
+        let rt = ensure_runtime_with(store.path(), failing_resolver).unwrap();
+        assert_eq!(rt.version, "1.85.0");
+        assert!(rt._cargo_exe.exists());
+    }
+
+    #[test]
+    fn unreachable_manifest_with_empty_store_is_an_error() {
+        let store = tempfile::TempDir::new().unwrap();
+        let Err(err) = ensure_runtime_with(store.path(), failing_resolver) else {
+            panic!("expected an error with an empty store");
+        };
+        let msg = format!("{err:#}");
+        assert!(msg.contains("Rust channel unreachable and no toolchain in the store"), "{msg}");
+        assert!(msg.contains("static.rust-lang.org"), "{msg}");
+        assert!(msg.contains("simulated"), "{msg}");
     }
 }
