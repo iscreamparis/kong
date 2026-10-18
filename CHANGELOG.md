@@ -109,6 +109,7 @@ and KONG adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   local tarball errors clearly instead of hitting the registry.
 
 ### Changed
+- `link_package` copies instead of symlinking on a cross-device store (commit 962c703).
 - **Releases are built by GitHub Actions for Linux and Windows only** (`.github/workflows/release.yml`,
   replacing `release-linux.yml`): a static musl Linux tarball, the Windows NSIS installer and a bare
   `kong.exe` zip, each with a `.sha256`, plus version-less copies for `releases/latest/download` links.

@@ -1,0 +1,9 @@
+Supervisor VM run instructions
+
+From the kong repository root, after pushing the Royal Fiesta branch, run:
+
+`bash scripts/realcase/royal-fiesta.sh --host "${RF_VM_HOST:-etcito-vm}" --branch nmc/68-kong-dependencies-from-github-b2--m4-royal-fiesta-builds-from --out /root/nmc/evidence/68-m4/royal-fiesta-vm`
+
+Expected output: `/root/nmc/evidence/68-m4/royal-fiesta-vm/transcript-vm.txt`.
+
+The VM run had not been delivered when the evidence was committed.
