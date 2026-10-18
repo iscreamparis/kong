@@ -21,6 +21,8 @@ pub enum Commands {
     Rules(RulesCmd),
     /// Create virtual environments from kong.rules
     Use(UseCmd),
+    /// Print the environment variables that point Cargo at Kong's registry and build cache
+    Env(EnvCmd),
     /// Run a named script in the kong-managed environment
     Run(RunCmd),
     /// Clone + rules + use + run scripts — full end-to-end setup & smoke test
@@ -78,6 +80,17 @@ pub struct UseCmd {
     /// Remove existing virtual environments before rebuilding
     #[arg(long)]
     pub clean: bool,
+}
+
+#[derive(Parser)]
+pub struct EnvCmd {
+    /// Path to project directory (defaults to current directory)
+    #[arg(short, long)]
+    pub path: Option<PathBuf>,
+
+    /// Output syntax: "sh" (`eval "$(kong env)"`) or "ps1" (`kong env --shell ps1 | Invoke-Expression`)
+    #[arg(long, default_value = "sh")]
+    pub shell: String,
 }
 
 #[derive(Parser)]

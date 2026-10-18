@@ -111,10 +111,19 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let filter = if cli.verbose { "kong=trace" } else { "kong=info" };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
+    // `kong env` output is eval'd by the shell: its logs must not reach stdout.
+    if matches!(cli.command, Some(Commands::Env(_))) {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .init();
+    }
 
     // No subcommand → launch GUI (e.g. double-click from Finder).
     // On a CLI-only build (no `gui` feature, e.g. headless Linux) there is no
@@ -270,6 +279,7 @@ fn main() -> Result<()> {
             if let Some(ref rs) = rules.rust {
                 rust_eco::source::configure_source_replacement(&env_dir, rs, &store::store_root()?, &rules)?;
                 info!("Rust source replacement configured");
+                info!("Cargo env ready: eval \"$(kong env)\"");
             }
 
             // ── Brew (system packages) ────────────────────────────────────
@@ -285,6 +295,34 @@ fn main() -> Result<()> {
             link::create_project_junctions(project_dir, &env_dir, &rules)?;
             store::register_project(&project_name, project_dir);
             info!("Project-dir junctions created");
+        }
+        Commands::Env(cmd) => {
+            let project_dir = cmd.path
+                .unwrap_or_else(|| std::env::current_dir().unwrap());
+            let rules = config::read_rules(&project_dir.join("kong.rules"))?;
+            let project_name = if rules.project.trim().is_empty() {
+                config::resolve_project_name(&project_dir)
+            } else {
+                rules.project.clone()
+            };
+            let render: fn(&rust_eco::cargo_env::CargoEnv) -> String = match cmd.shell.as_str() {
+                "sh" => rust_eco::cargo_env::shell_exports,
+                "ps1" => rust_eco::cargo_env::activate_ps1,
+                other => anyhow::bail!("unknown shell '{other}' (accepted values: sh, ps1)"),
+            };
+            // No Rust section: there is no Cargo environment, and an empty output
+            // keeps `eval "$(kong env)"` harmless.
+            if let Some(ref rs) = rules.rust {
+                let env_dir = store::rulez_dir(&project_name)?;
+                let env = rust_eco::source::plan_cargo_env(
+                    &env_dir,
+                    rs,
+                    &store::store_root()?,
+                    &rules,
+                    &rust_eco::target_cache::cache_root()?,
+                )?;
+                print!("{}", render(&env));
+            }
         }
         Commands::Run(cmd) => {
             let project_dir = cmd.path
@@ -481,4 +519,21 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_command_parses_shell_and_path() {
+        let cli = Cli::try_parse_from(["kong", "env", "--shell", "ps1", "-p", "/x"]).unwrap();
+        match cli.command {
+            Some(Commands::Env(cmd)) => {
+                assert_eq!(cmd.shell, "ps1");
+                assert_eq!(cmd.path, Some(std::path::PathBuf::from("/x")));
+            }
+            _ => panic!("expected Commands::Env"),
+        }
+    }
 }
