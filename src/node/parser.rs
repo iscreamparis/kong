@@ -88,16 +88,62 @@ fn parse_all(project_dir: &Path) -> Result<Vec<NodeDep>> {
         if pkg.exists() {
             prefer_absolute_manifest_paths(&mut deps, &pkg)?;
         }
+        apply_git_declarations(&mut deps, project_dir)?;
         return Ok(deps);
     }
 
     let pkg = project_dir.join("package.json");
     if pkg.exists() {
         debug!("Found package.json");
-        return parse_package_json(&pkg);
+        let mut deps = parse_package_json(&pkg)?;
+        apply_git_declarations(&mut deps, project_dir)?;
+        return Ok(deps);
     }
 
     Ok(vec![])
+}
+
+/// Replace whatever the lockfile (or package.json) says about each kong git
+/// dependency by one git `NodeDep` (shared §1 "Lockfile interplay").
+///
+/// The project's own lockfile may still hold a stale `file:` link, an npm git
+/// entry or a nested tree under `node_modules/<name>/node_modules/` from before
+/// the dependency moved to git; the git dependency brings its own tree from its
+/// own lockfile, so all of those are dropped. Without any declaration `deps` is
+/// left untouched, so a project without `kong.git` resolves exactly as before.
+fn apply_git_declarations(deps: &mut Vec<NodeDep>, project_dir: &Path) -> Result<()> {
+    let sources = git_declarations(project_dir)?;
+    if sources.is_empty() {
+        return Ok(());
+    }
+    let before = deps.len();
+    for src in &sources {
+        let nested = format!("node_modules/{}/node_modules/", src.name);
+        deps.retain(|d| {
+            d.name != src.name && !d.path.as_deref().is_some_and(|p| p.starts_with(&nested))
+        });
+    }
+    let dropped = before - deps.len();
+    debug!(
+        git = sources.len(),
+        dropped, "Git dependencies replace their lockfile entries"
+    );
+    for src in sources {
+        deps.push(NodeDep {
+            name: src.name.clone(),
+            version: "0.0.0".into(),
+            _resolved: None,
+            _integrity: None,
+            os: Vec::new(),
+            cpu: Vec::new(),
+            libc: Vec::new(),
+            optional: false,
+            local: None,
+            path: None,
+            git: Some(src),
+        });
+    }
+    Ok(())
 }
 
 /// A local (`file:`/`link:`) dependency the MANIFEST declares with an ABSOLUTE
@@ -1475,5 +1521,152 @@ mod tests {
         assert_eq!(names, ["a", "b"]);
         assert_eq!(srcs[0].repo, srcs[1].repo);
         assert_eq!(srcs[0].repo, "https://github.com/Fx/Core.git");
+    }
+    /// A project lockfile from before `@fx/core` moved to git: a `link: true`
+    /// entry, its target, and a nested install under the old link.
+    const STALE_GIT_LOCK: &str = r#"{
+        "name": "app",
+        "lockfileVersion": 3,
+        "packages": {
+            "": { "name": "app", "dependencies": { "@fx/core": "file:../core", "vue": "^3.5.0" } },
+            "../core": { "name": "@fx/core", "version": "0.9.0" },
+            "node_modules/@fx/core": { "resolved": "../core", "link": true },
+            "node_modules/@fx/core/node_modules/x": {
+                "version": "1.0.0",
+                "resolved": "https://registry.npmjs.org/x/-/x-1.0.0.tgz"
+            },
+            "node_modules/vue": {
+                "version": "3.5.13",
+                "resolved": "https://registry.npmjs.org/vue/-/vue-3.5.13.tgz"
+            },
+            "node_modules/@vue/shared": {
+                "version": "3.5.13",
+                "resolved": "https://registry.npmjs.org/@vue/shared/-/shared-3.5.13.tgz"
+            }
+        }
+    }"#;
+
+    const GIT_MANIFEST: &str = r#"{ "name": "app",
+        "dependencies": { "@fx/core": "git+file:///tmp/r#v1.0.0", "vue": "^3.5.0" },
+        "kong": { "git": { "@fx/core": { "path": "packages/core" } } } }"#;
+
+    /// (name, version, path, local?, git?) of every dep, sorted, for comparisons.
+    fn summary(deps: &[NodeDep]) -> Vec<(String, String, Option<String>, bool, bool)> {
+        let mut v: Vec<_> = deps
+            .iter()
+            .map(|d| {
+                (
+                    d.name.clone(),
+                    d.version.clone(),
+                    d.path.clone(),
+                    d.is_local(),
+                    d.git.is_some(),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn assert_single_git_core(deps: &[NodeDep]) {
+        let core: Vec<&NodeDep> = deps.iter().filter(|d| d.name == "@fx/core").collect();
+        assert_eq!(core.len(), 1, "{deps:?}");
+        let g = core[0].git.as_ref().expect("git source");
+        assert_eq!(g.repo, "file:///tmp/r");
+        assert_eq!(g.path, "packages/core");
+        assert_eq!(core[0].version, "0.0.0");
+        assert!(core[0].local.is_none() && core[0].path.is_none());
+        assert!(!core[0].has_platform_constraint());
+        assert!(
+            deps.iter().all(|d| !d
+                .path
+                .as_deref()
+                .is_some_and(|p| p.starts_with("node_modules/@fx/core/"))),
+            "{deps:?}"
+        );
+    }
+
+    #[test]
+    fn git_declaration_replaces_stale_lockfile_entries() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_manifest(tmp.path(), "package-lock.json", STALE_GIT_LOCK);
+        write_manifest(
+            tmp.path(),
+            "package.json",
+            r#"{ "name": "app", "dependencies": { "@fx/core": "file:../core", "vue": "^3.5.0" } }"#,
+        );
+        let before = detect_and_parse_for_host(tmp.path(), &linux_x64_glibc()).unwrap();
+        assert!(before.iter().any(|d| d.name == "@fx/core" && d.is_local()));
+
+        write_manifest(tmp.path(), "package.json", GIT_MANIFEST);
+        let deps = detect_and_parse_for_host(tmp.path(), &linux_x64_glibc()).unwrap();
+        assert_single_git_core(&deps);
+
+        // Every other dep is exactly what it was before the declaration.
+        let others = |d: &[NodeDep]| {
+            summary(d)
+                .into_iter()
+                .filter(|s| s.0 != "@fx/core" && s.0 != "x")
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(others(&deps), others(&before));
+        assert_eq!(deps.len(), 3, "{deps:?}");
+    }
+
+    #[test]
+    fn git_declaration_in_package_json_only_branch() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_manifest(tmp.path(), "package.json", GIT_MANIFEST);
+        let deps = detect_and_parse_for_host(tmp.path(), &linux_x64_glibc()).unwrap();
+        assert_single_git_core(&deps);
+        assert_eq!(
+            summary(&deps),
+            vec![
+                (
+                    "@fx/core".to_string(),
+                    "0.0.0".to_string(),
+                    None,
+                    false,
+                    true
+                ),
+                ("vue".to_string(), "3.5.0".to_string(), None, false, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn undeclared_git_spec_is_parsed_as_before() {
+        let manifest = r#"{ "name": "app",
+            "dependencies": { "@fx/core": "git+file:///tmp/r#v1.0.0", "vue": "^3.5.0" } }"#;
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_manifest(tmp.path(), "package.json", manifest);
+        let deps = parse_all(tmp.path()).unwrap();
+        let direct = parse_package_json(&tmp.path().join("package.json")).unwrap();
+        assert_eq!(summary(&deps), summary(&direct));
+        assert!(deps.iter().all(|d| d.git.is_none()));
+
+        write_manifest(tmp.path(), "package-lock.json", STALE_GIT_LOCK);
+        let deps = parse_all(tmp.path()).unwrap();
+        let direct = parse_package_lock(&tmp.path().join("package-lock.json")).unwrap();
+        assert_eq!(summary(&deps), summary(&direct));
+        assert!(deps.iter().all(|d| d.git.is_none()));
+    }
+
+    #[test]
+    fn project_without_kong_key_is_unchanged() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_manifest(tmp.path(), "package-lock.json", LOCAL_LOCK);
+        write_manifest(
+            tmp.path(),
+            "package.json",
+            r#"{ "name": "nomorechat-app", "dependencies": { "@real3d/atoms": "file:../vendor/atoms", "vue": "^3.5.0" } }"#,
+        );
+        let deps = parse_all(tmp.path()).unwrap();
+        let direct = parse_package_lock(&tmp.path().join("package-lock.json")).unwrap();
+        assert_eq!(summary(&deps), summary(&direct));
+        assert_eq!(
+            deps.iter().map(|d| d.local.clone()).collect::<Vec<_>>(),
+            direct.iter().map(|d| d.local.clone()).collect::<Vec<_>>()
+        );
     }
 }
