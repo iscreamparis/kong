@@ -7,6 +7,24 @@ and KONG adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Git dependencies (`kong.git`).** A npm git spec named in a `kong.git` block of `package.json` is
+  cloned once per commit into the store (`node/git/<repo>/<commit12>/`), its own dependencies are
+  installed from its `package-lock.json`, and `kong use` links it at `node_modules/<name>`. Recorded
+  in `kong.rules` under `node.git`; projects without `kong.git` get an unchanged `kong.rules`.
+- **Build step.** An optional `build` (script or command, run with bash — Git for Windows bash on
+  Windows) runs once per commit and build string with the Kong-managed Rust toolchain (plus
+  `rustTargets` / `rust-toolchain.toml` targets), the Kong Node runtime and a shared `CARGO_HOME`;
+  output goes to a log file in the commit dir, and a failure error shows its last 20 lines.
+- **Private repositories.** Git's credential helper and ssh agent work as-is; `KONG_GIT_TOKEN`
+  (all https hosts) or `GITHUB_TOKEN` / `GH_TOKEN` (github.com) are passed to git only through
+  `GIT_CONFIG_*`, never written anywhere; prompts are disabled.
+- **`kong rules --update-git`** re-resolves git dependencies to the remote's current commit; by default
+  the commits in `kong.rules` are kept with no remote call.
+- **`kong solidify` / `kong eject`** handle git dependencies: solidify copies them as real
+  directories with build output and their own `node_modules`; eject removes commit dirs used only by
+  the project.
+
 ## [0.8.7] — 2026-10-12
 
 ### Fixed

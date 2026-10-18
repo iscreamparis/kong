@@ -189,6 +189,7 @@ downloads + verifies     →          global store (written once)
 | `kong rules --force` | Re-download everything even if already in store |
 | `kong rules --path <dir>` | Run rules on a different project directory |
 | `kong rules --python <ver>` | Pick the Python runtime (version prefix or PEP 440 specifier); default: `.python-version`, then `requires-python`, then latest |
+| `kong rules --update-git` | Re-resolve git dependencies (`kong.git`) to the remote's current commit; default keeps the commits recorded in `kong.rules` |
 | `kong use [kong.rules]` | Create `.venv`, `node_modules`, `.cargo` via links; re-points a stale or dangling link, never touches a real directory |
 | `kong use --clean` | Tear down and rebuild the project environment |
 | `kong run <script>` | Run a script from `package.json` or `pyproject.toml` |
@@ -253,6 +254,81 @@ what npm does with its default `install-links=false` — so edits to the local p
   depth (a git worktree, a copy) the relative path points nowhere. When `package.json` gives an
   absolute `file:`/`link:` path, `kong rules` uses it; a relative one keeps the lockfile's path.
 - `kong solidify` keeps local packages linked (a copy would freeze live source).
+
+### Git dependencies (`kong.git`)
+
+A Node dependency declared as a standard npm git spec **and** named in a top-level `kong.git` block of
+the same `package.json` is cloned once into the store, has its own dependencies installed from its
+lockfile, optionally gets a build step, and is linked at `node_modules/<name>`.
+
+```json
+{
+  "dependencies": {
+    "@gamesaloon/rollback": "git+https://github.com/Etcito/gamesaloon-rollback.git#v0.4.0",
+    "@etcito/raa": "github:Etcito/raa#3f2c…(40 hex)"
+  },
+  "kong": { "git": {
+    "@gamesaloon/rollback": { "path": "packages/core" },
+    "@etcito/raa": { "path": "packages/raa", "build": "scripts/build-package.sh", "rustTargets": ["wasm32-unknown-unknown"] }
+  } }
+}
+```
+
+- **Where declarations are read:** the root `package.json` and each workspace member's `package.json`
+  (`workspaces` entries: a literal directory or `dir/*`). The same name declared twice is an error.
+  Every git dependency is linked at the project's top-level `node_modules/<name>`.
+- **`kong.git.<name>` keys:** `path` (subdirectory of the repository, default the root; no absolute
+  path, `..` or `:`), `build` (a script path in the repository, or a shell command), `rustTargets`
+  (target triples). Any other key is an error, as is an entry whose dependency is missing or not a git spec.
+- **Accepted specs:** `github:ORG/REPO[#ref]`, `git+https://…`, `git+http://…`, `git+ssh://[git@]host/…`,
+  `git+file:///abs/path`, `git://…`. The `#ref` is a tag, a branch or a full 40-hex commit; without it the
+  remote `HEAD` is used. **Rejected:** userinfo in an http(s) URL, `#semver:…`, `::` in the fragment, an
+  abbreviated 7–39-hex commit.
+- **`kong.rules`** records each one under `node.git` (omitted when empty):
+  ```json
+  "node": { "packages": [ … ], "git": [ { "name": "@etcito/raa", "version": "0.3.0",
+    "source": "github:Etcito/raa#v0.3.0", "repo": "https://github.com/Etcito/raa.git",
+    "reference": "v0.3.0", "commit": "<40 hex>", "path": "packages/raa",
+    "build": "scripts/build-package.sh", "rust_targets": ["wasm32-unknown-unknown"],
+    "declared_by": "apps/web/package.json", "store_path": "node/git/raa-1a2b3c4d/3f2c0a9d81b7",
+    "lock_dir": "packages/raa", "packages": [ … ] } ] }
+  ```
+- **Store layout** (one commit dir per repository and commit, shared by every project):
+  ```
+  <store>/node/git/<repo_key>/<commit12>/
+    src/                      the checkout (tracked files never modified)
+    src/<lock_dir>/node_modules/   the dependency's own tree (hard links into node/libs)
+    .kong-cloned  .kong-installed  .kong-built-<build_key>   markers (JSON, with timings)
+    build-<build_key>.log     combined stdout+stderr of the build
+  <store>/node/git/.cargo-home/    CARGO_HOME shared by every build
+  ```
+  `repo_key` is the repository name plus 8 hex of the hash of its URL. The tree lives under the checkout
+  because Node and Vite resolve symlinks to their real path and walk up from there.
+- **Credentials.** KONG runs the `git` CLI, so your git credential helper and ssh agent work as-is.
+  Prompts are disabled (`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`): a missing credential fails
+  instead of hanging. `KONG_GIT_TOKEN` applies to every `https://` host; `GITHUB_TOKEN`, then `GH_TOKEN`,
+  apply to `github.com` only. The token is passed to the git child only through `GIT_CONFIG_*`
+  environment variables; it is never on a command line, in a URL, in `kong.rules`, in a path, in a marker
+  or in a log line (git stderr printed by KONG is redacted).
+- **Build step** (when `build` is set). Runs once per commit and build string, after the install, with
+  the repository root as working directory: `bash <build>` if it is a file in the repository, else
+  `bash -c "<build>"`. On Windows it uses the bash of Git for Windows (never a `bash.exe` from `PATH`,
+  which may be WSL's). `PATH` gets, in front: the Kong-managed Rust toolchain `bin`, the shared
+  `CARGO_HOME/bin`, the Kong Node runtime, and `<lock_dir>/node_modules/.bin`. `CARGO_HOME` and `RUSTC`
+  are set, as are `KONG_GIT_DEP`, `KONG_GIT_COMMIT` and `KONG_GIT_CHECKOUT`. Rust targets (`rustTargets`
+  plus `[toolchain].targets` of `rust-toolchain.toml`) are added to the managed toolchain first. Output
+  goes to `build-<build_key>.log`; a lock file serialises concurrent builds. A failure names the
+  dependency, spec, commit, origin and log, and shows the last 20 log lines.
+- **Pinning and updating.** `kong rules` keeps the commit recorded in `kong.rules` (same name, repo,
+  reference and path): no `ls-remote`, no clone, no build on a re-run, even if the tag or branch moved.
+  `kong rules --update-git` re-resolves tags, branches and `HEAD` to the remote's current commit.
+  A full 40-hex commit in the spec never touches the remote for resolution.
+- **`kong solidify`** replaces the link with a real directory: the dependency's `path` from the checkout
+  (without `.git` and `node_modules`, with build outputs), its own registry packages in
+  `node_modules/`, and its own workspace links. **`kong eject`** removes a commit dir that only this
+  project uses, and keeps one shared with other projects.
+- **Limits:** the dependency's own dependencies come from its `package-lock.json` only; no `#semver:`;
+  full 40-hex commits only (no abbreviations); the repository is never modified.
 
 ---
 
@@ -532,6 +608,7 @@ KONG is early-stage software. Here's what doesn't work yet — no surprises.
 - **Nested registry installs (`package-lock.json` v1/v2/v3).** A second version npm keeps under another package (`node_modules/path-scurry/node_modules/lru-cache`) is recorded in `kong.rules` with its lockfile `path` and placed at that path by `kong use`; the hoisted `node_modules/<name>` is always the lockfile's top-level version, and a wrong top-level left by an older KONG is relinked. Not covered: a nested install without a lockfile (`package.json` only), pnpm virtual-store keys and workspace-member nested installs (still flat, by name).
 - **Stale links.** A `node_modules` / `.venv` link left by another machine (committed to the repo, dangling here) is re-pointed by `kong use`; a real directory at that path is never replaced.
 - **Local packages: directories only, top level only.** `file:`/`link:` directories are linked (see *Local Node packages*). A local **tarball** (`file:../x-1.0.0.tgz`) fails with a clear error; a local link nested under another package (`node_modules/a/node_modules/b` → dir) is skipped with a warning (local links are only placed at the top level). The local package's own dependencies are never installed by KONG — same as npm.
+- **Git dependencies (`kong.git`).** Only a spec named in a `kong.git` block is handled by KONG (other git specs keep their old handling). The dependency's own dependencies come from **its `package-lock.json` only** (no lockfile and declared dependencies is an error). `#semver:` ranges are rejected, abbreviated commits (7–39 hex) are rejected (use the full 40-hex commit, a tag or a branch), and userinfo in an `http(s)` URL is rejected. The cloned repository is never modified (a build that changes tracked files only produces a warning). See *Git dependencies*.
 
 ### Rust
 - **Cargo features and patches ignored.** Source replacement works for vanilla `Cargo.lock` deps, but `[features]` selections and `[patch]` overrides in `Cargo.toml` are not reflected.
