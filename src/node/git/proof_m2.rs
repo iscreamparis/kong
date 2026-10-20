@@ -94,7 +94,7 @@ fn backcompat(store: &Path) {
             packages.push(config::node_package_entry(dep, store, false).unwrap());
         }
     }
-    let json = serde_json::to_string(&NodeSection { packages, local, git: Vec::new() }).unwrap();
+    let json = serde_json::to_string(&NodeSection { packages, local, git: Vec::new(), tarballs: Vec::new() }).unwrap();
     // Pre-change shape: no `git` key, no hash/source_url on a stored package.
     let expected = r#"{"packages":[{"name":"is-fixture","version":"1.0.0","store_path":"node/libs/is-fixture-1.0.0"}],"local":[{"name":"localpkg","version":"2.0.0","path":"../localpkg"}]}"#;
     let same = json == expected;
@@ -157,7 +157,7 @@ fn proof_m2() {
             unreachable!()
         }
     };
-    let section = || NodeSection { packages: Vec::new(), local: Vec::new(), git: entries.clone() };
+    let section = || NodeSection { packages: Vec::new(), local: Vec::new(), git: entries.clone(), tarballs: Vec::new() };
     let rules_path = project.join("kong.rules");
     config::write_rules(&rules_with(section()), &rules_path).unwrap();
     crate::node::modules::build_node_modules(project, project, &section(), store).unwrap();

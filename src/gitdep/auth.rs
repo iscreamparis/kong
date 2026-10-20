@@ -47,6 +47,31 @@ pub fn git_env_from(get: &dyn Fn(&str) -> Option<String>) -> GitEnv {
     GitEnv::default()
 }
 
+/// The token for downloading `url` over https, with the same sources and
+/// precedence as `git_env_from`: `KONG_GIT_TOKEN` applies to every https host;
+/// otherwise `GITHUB_TOKEN`, then `GH_TOKEN`, apply to `github.com` only. A
+/// plain `http://` URL never gets a token. The caller sends it in an
+/// `Authorization` header to the URL's own origin only (never to a redirect
+/// target on another host) and never logs or records it.
+pub fn http_token_for(get: &dyn Fn(&str) -> Option<String>, url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    let host = rest.split(['/', '?', '#', ':']).next().unwrap_or("").to_ascii_lowercase();
+    let github = host == "github.com";
+    let sources: &[&str] = if github {
+        &["KONG_GIT_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"]
+    } else {
+        &["KONG_GIT_TOKEN"]
+    };
+    sources.iter().find_map(|name| {
+        let value = get(name)?;
+        let token = value.trim();
+        (!token.is_empty()).then(|| {
+            debug!(source = *name, "download token supplied by the environment");
+            token.to_string()
+        })
+    })
+}
+
 /// The credential environment of this machine's process environment.
 pub fn machine_git_env() -> GitEnv {
     git_env_from(&|key| std::env::var(key).ok())
@@ -187,6 +212,29 @@ mod tests {
         let env = env_of(&[("KONG_GIT_TOKEN", "  "), ("GH_TOKEN", "")]);
         assert!(env.vars.is_empty());
         assert!(env.secrets.is_empty());
+    }
+
+    #[test]
+    fn http_token_follows_the_git_precedence_and_host_rules() {
+        let get = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+        };
+        let gh = "https://github.com/O/r/releases/download/v1/a.tgz";
+        let other = "https://example.org/a.tgz";
+        let all = get(&[("KONG_GIT_TOKEN", "kong"), ("GITHUB_TOKEN", "gh"), ("GH_TOKEN", "cli")]);
+        assert_eq!(http_token_for(&all, gh).as_deref(), Some("kong"));
+        assert_eq!(http_token_for(&all, other).as_deref(), Some("kong"));
+        let gh_only = get(&[("GITHUB_TOKEN", " gh 
+"), ("GH_TOKEN", "cli")]);
+        assert_eq!(http_token_for(&gh_only, gh).as_deref(), Some("gh"));
+        assert_eq!(http_token_for(&gh_only, other), None);
+        // Another host that merely contains "github.com" gets nothing.
+        assert_eq!(http_token_for(&gh_only, "https://github.com.evil.example/a.tgz"), None);
+        let cli = get(&[("GITHUB_TOKEN", "  "), ("GH_TOKEN", "cli")]);
+        assert_eq!(http_token_for(&cli, gh).as_deref(), Some("cli"));
+        // Never over plain http.
+        assert_eq!(http_token_for(&all, "http://github.com/a.tgz"), None);
+        assert_eq!(http_token_for(&get(&[]), gh), None);
     }
 
     #[test]

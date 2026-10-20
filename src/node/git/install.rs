@@ -125,7 +125,7 @@ pub fn install_own_dependencies(
     let node = NodeSection {
         packages,
         local,
-        git: vec![],
+        git: vec![], tarballs: vec![],
     };
     crate::node::modules::build_node_modules(&lock_abs, &lock_abs, &node, store_root)
         .with_context(|| {

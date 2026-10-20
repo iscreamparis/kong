@@ -228,7 +228,7 @@ fn no_secret_written(fx: &GitFixture) {
         Err(e) => (format!("{e:#}").matches(SENTINEL).count(), Vec::new()),
     };
     if let Ok((entries, _)) = &res {
-        let section = crate::config::NodeSection { packages: Vec::new(), local: Vec::new(), git: entries.clone() };
+        let section = crate::config::NodeSection { packages: Vec::new(), local: Vec::new(), git: entries.clone(), tarballs: Vec::new() };
         crate::config::write_rules(&rules_with(section), &project.path().join("kong.rules")).unwrap();
     }
     let mut count = err_count + count_in_tree(project.path(), SENTINEL);
@@ -272,6 +272,7 @@ fn solidify_eject(
         packages: vec![seeded.clone()],
         local: Vec::new(),
         git: first.to_vec(),
+        tarballs: Vec::new(),
     };
     let nm = project.join("node_modules");
     let solid = crate::migrate::solidify_node(&nm, project, &section, store);

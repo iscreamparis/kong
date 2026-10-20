@@ -4,7 +4,9 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use tracing::{debug, info};
 
-use crate::config::{GitPackageEntry, LocalPackageEntry, NodeSection, PackageEntry};
+use crate::config::{
+    GitPackageEntry, LocalPackageEntry, NodeSection, PackageEntry, TarballPackageEntry,
+};
 use crate::link;
 
 /// Build node_modules from the store using deep hard links.
@@ -35,7 +37,13 @@ pub fn build_node_modules(
 
     link_local_packages(&nm, project_dir, &node.local)?;
     link_git_packages(&nm, &node.git, store_root)?;
-    let git_names: HashSet<&str> = node.git.iter().map(|g| g.name.as_str()).collect();
+    link_tarball_packages(&nm, &node.tarballs, store_root)?;
+    let git_names: HashSet<&str> = node
+        .git
+        .iter()
+        .map(|g| g.name.as_str())
+        .chain(node.tarballs.iter().map(|t| t.name.as_str()))
+        .collect();
 
     // Top-level entries FIRST (no `path`), whatever the order of the list: the
     // hoisted `node_modules/<name>` must be the lockfile's own top-level version,
@@ -132,7 +140,8 @@ pub fn build_node_modules(
         .iter()
         .map(|p| p.name.as_str())
         .chain(node.local.iter().map(|l| l.name.as_str()))
-        .chain(node.git.iter().map(|g| g.name.as_str()));
+        .chain(node.git.iter().map(|g| g.name.as_str()))
+        .chain(node.tarballs.iter().map(|t| t.name.as_str()));
     for pkg_name in bin_owners {
         let top_level = nm.join(pkg_name);
         if !top_level.exists() {
@@ -368,6 +377,55 @@ pub fn link_git_packages(nm: &Path, git: &[GitPackageEntry], store_root: &Path) 
     Ok(())
 }
 
+/// Link each tarball dependency at `node_modules/<name>` -> `package/` of its
+/// assembled tree in the store (`tarball_link_target`).
+///
+/// Like a git dependency the link goes to the REAL store path, so Node finds the
+/// package's own `node_modules` (assembled by `kong rules`) by walking up from
+/// there. Idempotent: a correct link is kept, a stale one replaced, a real env
+/// directory removed; the store tree is never written to.
+pub fn link_tarball_packages(
+    nm: &Path,
+    tarballs: &[TarballPackageEntry],
+    store_root: &Path,
+) -> Result<()> {
+    for t in tarballs {
+        crate::node::tarball::check_prepared(store_root, t)?;
+        let target = crate::node::tarball::tarball_link_target(store_root, t);
+        let dst = nm.join(&t.name);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        if is_dir_link(&dst) {
+            if link_points_to(&dst, &target) {
+                debug!(pkg = %t.name, "Tarball link already correct");
+                continue;
+            }
+            remove_dir_link(&dst)?;
+        } else if dst.exists() {
+            link::remove_dir_all_robust(&dst).with_context(|| {
+                format!(
+                    "failed to replace {} with a link to tarball dependency '{}'",
+                    dst.display(),
+                    t.name
+                )
+            })?;
+        }
+
+        link::link_dir(&target, &dst).with_context(|| {
+            format!(
+                "failed to link tarball dependency '{}': {} -> {}",
+                t.name,
+                dst.display(),
+                target.display()
+            )
+        })?;
+        info!(pkg = %t.name, version = %t.version, target = %target.display(), "Linked tarball dependency");
+    }
+    Ok(())
+}
+
 /// True if `p` is a directory junction (Windows) or a symlink (any OS).
 fn is_dir_link(p: &Path) -> bool {
     let is_symlink = std::fs::symlink_metadata(p)
@@ -475,7 +533,7 @@ mod tests {
         let node = NodeSection {
             packages: vec![],
             local: vec![local("@real3d/atoms", "../vendor/atoms")],
-            git: vec![],
+            git: vec![], tarballs: vec![],
         };
         let store = tempfile::TempDir::new().unwrap();
         build_node_modules(&env, &app, &node, store.path()).unwrap();
@@ -513,7 +571,7 @@ mod tests {
         let node = NodeSection {
             packages: vec![],
             local: vec![local("@real3d/atoms", "../vendor/atoms")],
-            git: vec![],
+            git: vec![], tarballs: vec![],
         };
         build_node_modules(&env, &app, &node, store.path()).unwrap();
         build_node_modules(&env, &app, &node, store.path()).unwrap(); // twice: no error
@@ -530,7 +588,7 @@ mod tests {
         let moved = NodeSection {
             packages: vec![],
             local: vec![local("@real3d/atoms", "../CRM_Atoms")],
-            git: vec![],
+            git: vec![], tarballs: vec![],
         };
         build_node_modules(&env, &app, &moved, store.path()).unwrap();
         let dst = env.join("node_modules").join("@real3d").join("atoms");
@@ -551,7 +609,7 @@ mod tests {
         let node = NodeSection {
             packages: vec![],
             local: vec![local("@real3d/atoms", "../nowhere/atoms")],
-            git: vec![],
+            git: vec![], tarballs: vec![],
         };
         let err = build_node_modules(&env, &app, &node, store.path()).unwrap_err();
         let msg = format!("{err:#}");
@@ -567,7 +625,7 @@ mod tests {
         let node = NodeSection {
             packages: vec![],
             local: vec![local("@real3d/atoms", "../vendor/atoms")],
-            git: vec![],
+            git: vec![], tarballs: vec![],
         };
         build_node_modules(&env, &app, &node, store.path()).unwrap();
         link::clean_environments(&env, false).unwrap();
@@ -656,7 +714,7 @@ mod tests {
             let node = NodeSection {
                 packages: perm.iter().map(|&i| base[i].clone()).collect(),
                 local: vec![],
-                git: vec![],
+                git: vec![], tarballs: vec![],
             };
             build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
             assert_eq!(
@@ -693,7 +751,7 @@ mod tests {
                 ),
             ],
             local: vec![],
-            git: vec![],
+            git: vec![], tarballs: vec![],
         };
         build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
         assert_eq!(
@@ -713,7 +771,7 @@ mod tests {
         let node = NodeSection {
             packages: nested_packages(store.path()),
             local: vec![],
-            git: vec![],
+            git: vec![], tarballs: vec![],
         };
         let before = tree(store.path());
         build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
@@ -740,7 +798,7 @@ mod tests {
         let mut old = NodeSection {
             packages: vec![pkgs[0].clone(), pkgs[1].clone()],
             local: vec![],
-            git: vec![],
+            git: vec![], tarballs: vec![],
         };
         old.packages[1].path = None;
         build_node_modules(env.path(), env.path(), &old, store.path()).unwrap();
@@ -749,7 +807,7 @@ mod tests {
         let node = NodeSection {
             packages: pkgs,
             local: vec![],
-            git: vec![],
+            git: vec![], tarballs: vec![],
         };
         build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
         assert_eq!(version_at(env.path(), "node_modules/lru-cache"), "5.1.1");
@@ -816,6 +874,7 @@ mod tests {
             packages: vec![],
             local: vec![],
             git: vec![git_entry(lock_dir)],
+            tarballs: vec![],
         }
     }
 
@@ -926,5 +985,116 @@ mod tests {
         assert!(!env.path().join("node_modules").exists());
         assert_eq!(before, file_count(&checkout));
         assert!(checkout.join("src/packages/core/package.json").is_file());
+    }
+
+    // -- tarball dependencies ------------------------------------------------
+
+    const TARBALL_TREE: &str = "node/tarballs/@fx+haa/aaaaaaaaaaaa/tree-12345678";
+
+    fn tarball_entry() -> TarballPackageEntry {
+        TarballPackageEntry {
+            name: "@fx/haa".into(),
+            version: "0.1.0".into(),
+            source: "https://h.example/haa.tgz".into(),
+            url: "https://h.example/haa.tgz".into(),
+            integrity: "sha512-AAAA".into(),
+            declared_by: "package.json".into(),
+            store_path: TARBALL_TREE.into(),
+            packages: vec![],
+        }
+    }
+
+    /// A hand-made assembled tree: `package/` (with a bin and its own
+    /// node_modules) and, when `installed`, the `.kong-installed` marker.
+    fn tarball_store(installed: bool) -> (tempfile::TempDir, std::path::PathBuf) {
+        let store = tempfile::TempDir::new().unwrap();
+        let tree = store.path().join(TARBALL_TREE);
+        let pkg = tree.join("package");
+        std::fs::create_dir_all(pkg.join("bin")).unwrap();
+        std::fs::create_dir_all(pkg.join("node_modules/leaf")).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{"name":"@fx/haa","version":"0.1.0","bin":{"haa":"bin/cli.js"}}"#,
+        )
+        .unwrap();
+        std::fs::write(pkg.join("bin/cli.js"), "console.log(1)").unwrap();
+        std::fs::write(pkg.join("node_modules/leaf/index.js"), "module.exports=1").unwrap();
+        if installed {
+            std::fs::write(tree.join(".kong-installed"), "{}").unwrap();
+        }
+        (store, pkg)
+    }
+
+    fn tarball_node() -> NodeSection {
+        NodeSection { packages: vec![], local: vec![], git: vec![], tarballs: vec![tarball_entry()] }
+    }
+
+    #[test]
+    fn tarball_link_points_at_the_tree_package_and_gets_its_bin() {
+        let (store, pkg) = tarball_store(true);
+        let env = tempfile::TempDir::new().unwrap();
+        build_node_modules(env.path(), env.path(), &tarball_node(), store.path()).unwrap();
+        let link = env.path().join("node_modules/@fx/haa");
+        assert_eq!(
+            std::fs::canonicalize(&link).unwrap(),
+            std::fs::canonicalize(&pkg).unwrap()
+        );
+        // The package's own dependency is visible from the link, like Node sees it.
+        assert!(link.join("node_modules/leaf/index.js").is_file());
+        let bin = env.path().join("node_modules/.bin");
+        assert!(bin.join("haa").exists() || bin.join("haa.cmd").exists());
+    }
+
+    #[test]
+    fn tarball_link_rerun_is_a_noop_and_replaces_stale_things() {
+        let (store, pkg) = tarball_store(true);
+        let env = tempfile::TempDir::new().unwrap();
+        let node = tarball_node();
+        build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
+        build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
+        let link = env.path().join("node_modules/@fx/haa");
+        // A real directory left by an older install is replaced by the link.
+        remove_dir_link(&link).unwrap();
+        std::fs::create_dir_all(&link).unwrap();
+        std::fs::write(link.join("old.js"), "x").unwrap();
+        build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
+        assert!(is_dir_link(&link) && !link.join("old.js").exists());
+        assert!(pkg.join("package.json").is_file(), "the store tree is untouched");
+    }
+
+    #[test]
+    fn tarball_missing_from_the_store_errors_with_the_hint() {
+        let (store, _pkg) = tarball_store(false);
+        let env = tempfile::TempDir::new().unwrap();
+        let err = build_node_modules(env.path(), env.path(), &tarball_node(), store.path())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'@fx/haa'") && err.contains("run `kong rules`"), "{err}");
+    }
+
+    #[test]
+    fn tarball_wins_over_a_registry_entry_of_the_same_name() {
+        let (store, pkg) = tarball_store(true);
+        let env = tempfile::TempDir::new().unwrap();
+        let mut node = tarball_node();
+        node.packages = vec![store_pkg(store.path(), "@fx/haa", "9.9.9")];
+        build_node_modules(env.path(), env.path(), &node, store.path()).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(env.path().join("node_modules/@fx/haa")).unwrap(),
+            std::fs::canonicalize(&pkg).unwrap()
+        );
+    }
+
+    #[test]
+    fn clean_environments_never_deletes_through_a_tarball_link() {
+        let (store, _pkg) = tarball_store(true);
+        let env = tempfile::TempDir::new().unwrap();
+        let tree = store.path().join(TARBALL_TREE);
+        let before = file_count(&tree);
+        build_node_modules(env.path(), env.path(), &tarball_node(), store.path()).unwrap();
+        link::clean_environments(env.path(), false).unwrap();
+        assert!(!env.path().join("node_modules").exists());
+        assert_eq!(before, file_count(&tree));
+        assert!(tree.join("package/package.json").is_file());
     }
 }

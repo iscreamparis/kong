@@ -105,6 +105,34 @@ pub struct NodeSection {
     /// kong.rules stays byte-identical for projects without `kong.git`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub git: Vec<GitPackageEntry>,
+    /// Tarball dependencies: a package.json dependency whose spec is an
+    /// http(s) URL (a GitHub Release asset, say), downloaded once, integrity
+    /// checked and extracted into the store. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tarballs: Vec<TarballPackageEntry>,
+}
+
+/// A Node dependency installed from an http(s) tarball URL and linked in place.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TarballPackageEntry {
+    pub name: String,
+    /// Version read from the tarball's own package.json.
+    pub version: String,
+    /// The spec exactly as declared (URL plus optional integrity fragment).
+    pub source: String,
+    /// The download URL, without fragment and without any credential.
+    pub url: String,
+    /// `sha512-<base64>` of the downloaded file: recorded on the first run
+    /// (trust on first use) and enforced on every later one.
+    pub integrity: String,
+    pub declared_by: String,
+    /// Store-relative directory of the linked tree
+    /// (`node/tarballs/<name>/<sha512 12 hex>/tree-<deps hash>`): the package in
+    /// `package/` next to its own `node_modules`.
+    pub store_path: String,
+    /// The tarball's own dependencies, resolved from its package.json.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<PackageEntry>,
 }
 
 /// A Node dependency cloned from git into the store and linked in place.
@@ -272,6 +300,19 @@ fn previous_git_entries(project_dir: &Path) -> Vec<GitPackageEntry> {
         Ok(rules) => rules.node.map(|n| n.git).unwrap_or_default(),
         Err(e) => {
             debug!(path = %path.display(), error = %format!("{e:#}"), "No previous git entries");
+            Vec::new()
+        }
+    }
+}
+
+/// The `node.tarballs` entries of the project's current kong.rules: their recorded
+/// integrity and resolved packages are the lock a re-run enforces and reuses.
+fn previous_tarball_entries(project_dir: &Path) -> Vec<TarballPackageEntry> {
+    let path = project_dir.join("kong.rules");
+    match read_rules(&path) {
+        Ok(rules) => rules.node.map(|n| n.tarballs).unwrap_or_default(),
+        Err(e) => {
+            debug!(path = %path.display(), error = %format!("{e:#}"), "No previous tarball entries");
             Vec::new()
         }
     }
@@ -572,7 +613,13 @@ pub fn generate_rules_with_options(project_dir: &Path, opts: &RulesOptions) -> R
         let mut packages = Vec::new();
         let mut local = Vec::new();
         let mut sources = Vec::new();
+        let mut tarball_sources = Vec::new();
         for dep in &node_deps {
+            // Tarball dependency (an http(s) URL spec): prepared below in one pass.
+            if let Some(ref src) = dep.tarball {
+                tarball_sources.push(src.clone());
+                continue;
+            }
             // Kong git dependency: prepared below in one pass over all of them.
             if let Some(ref src) = dep.git {
                 sources.push(src.clone());
@@ -616,8 +663,32 @@ pub fn generate_rules_with_options(project_dir: &Path, opts: &RulesOptions) -> R
             git = entries;
             git.sort_by(|a, b| a.name.cmp(&b.name));
         }
+        let mut tarballs = Vec::new();
+        if !tarball_sources.is_empty() {
+            let previous = previous_tarball_entries(project_dir);
+            let token_for = |url: &str| crate::gitdep::auth::http_token_for(&|k| std::env::var(k).ok(), url);
+            let registry = |name: &str| crate::node::tarball::fetch_packument("https://registry.npmjs.org", name);
+            let prepare_opts = crate::node::tarball::PrepareOptions {
+                force: opts.force,
+                host: crate::node::platform::HostTriple::current(),
+                token_for: &token_for,
+                registry: &registry,
+                allow_plain_http_token: false,
+            };
+            let (entries, report) = crate::node::tarball::prepare_all(
+                &store_root, &tarball_sources, &previous, &prepare_opts,
+            )?;
+            info!(
+                downloads = report.downloaded,
+                registry_lookups = report.registry_lookups,
+                download_seconds = report.download_seconds,
+                "Prepared tarball dependencies"
+            );
+            tarballs = entries;
+            tarballs.sort_by(|a, b| a.name.cmp(&b.name));
+        }
         let entry = RuntimeEntry { version: runtime.version, store_path: runtime.store_path };
-        (Some(entry), Some(NodeSection { packages, local, git }))
+        (Some(entry), Some(NodeSection { packages, local, git, tarballs }))
     } else {
         (None, None)
     };
@@ -1043,7 +1114,7 @@ mod tests {
 
     #[test]
     fn node_section_without_local_serializes_like_before() {
-        let s = NodeSection { packages: vec![], local: vec![], git: vec![] };
+        let s = NodeSection { packages: vec![], local: vec![], git: vec![], tarballs: vec![] };
         assert_eq!(serde_json::to_string(&s).unwrap(), r#"{"packages":[]}"#);
         // …and an old kong.rules (no `local`) still reads.
         let back: NodeSection = serde_json::from_str(r#"{"packages":[]}"#).unwrap();
@@ -1052,7 +1123,7 @@ mod tests {
 
     #[test]
     fn node_section_without_git_serializes_and_reads_like_before() {
-        let s = NodeSection { packages: vec![], local: vec![], git: vec![] };
+        let s = NodeSection { packages: vec![], local: vec![], git: vec![], tarballs: vec![] };
         assert_eq!(serde_json::to_string(&s).unwrap(), r#"{"packages":[]}"#);
         let back: NodeSection =
             serde_json::from_str(r#"{"packages":[],"local":[]}"#).unwrap();
@@ -1216,5 +1287,41 @@ mod tests {
         });
         std::fs::write(tmp.path().join("kong.rules"), rules.to_string()).unwrap();
         assert_eq!(previous_git_entries(tmp.path()), vec![entry]);
+    }
+
+    #[test]
+    fn node_section_without_tarballs_serializes_and_reads_like_before() {
+        let s = NodeSection { packages: vec![], local: vec![], git: vec![], tarballs: vec![] };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("tarballs"), "{json}");
+        let back: NodeSection = serde_json::from_str(r#"{"packages":[]}"#).unwrap();
+        assert!(back.tarballs.is_empty());
+    }
+
+    #[test]
+    fn tarball_package_entry_round_trips() {
+        let url = "https://github.com/Etcito/haa/releases/download/v0.1.0/etcito-haa-0.1.0.tgz";
+        let entry = TarballPackageEntry {
+            name: "@etcito/haa".into(),
+            version: "0.1.0".into(),
+            source: url.into(),
+            url: url.into(),
+            integrity: "sha512-AAAA".into(),
+            declared_by: "package.json".into(),
+            store_path: "node/tarballs/@etcito+haa/0123456789ab/tree-01234567".into(),
+            packages: vec![PackageEntry {
+                name: "ms".into(),
+                version: "2.1.3".into(),
+                hash: None,
+                store_path: "node/libs/ms-2.1.3".into(),
+                source_url: None,
+                path: None,
+            }],
+        };
+        let s = NodeSection { packages: vec![], local: vec![], git: vec![], tarballs: vec![entry.clone()] };
+        let json = serde_json::to_string_pretty(&s).unwrap();
+        assert!(json.contains("\"tarballs\"") && json.contains("sha512-AAAA"));
+        let back: NodeSection = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.tarballs, vec![entry]);
     }
 }

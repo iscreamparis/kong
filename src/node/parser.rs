@@ -4,6 +4,7 @@ use anyhow::{bail, Context, Result};
 use tracing::{debug, info, warn};
 
 use super::git::spec::{self, GitSource};
+use super::tarball::TarballSource;
 use super::platform::{self, HostTriple};
 
 /// A parsed dependency from a Node.js manifest.
@@ -35,6 +36,10 @@ pub struct NodeDep {
     /// it is cloned into the store and linked from there instead of being taken
     /// from the lockfile. `None` for every registry and local package.
     pub git: Option<GitSource>,
+    /// `Some` for a tarball dependency: a dependency whose spec is an http(s) URL
+    /// (a GitHub Release asset, say). It is downloaded once into the store, integrity
+    /// checked and linked in place, like a git dependency but with no clone and no build.
+    pub tarball: Option<TarballSource>,
 }
 
 /// Where a local (non-registry) Node package lives, as declared by the project.
@@ -89,6 +94,7 @@ fn parse_all(project_dir: &Path) -> Result<Vec<NodeDep>> {
             prefer_absolute_manifest_paths(&mut deps, &pkg)?;
         }
         apply_git_declarations(&mut deps, project_dir)?;
+        apply_tarball_declarations(&mut deps, project_dir)?;
         return Ok(deps);
     }
 
@@ -97,6 +103,7 @@ fn parse_all(project_dir: &Path) -> Result<Vec<NodeDep>> {
         debug!("Found package.json");
         let mut deps = parse_package_json(&pkg)?;
         apply_git_declarations(&mut deps, project_dir)?;
+        apply_tarball_declarations(&mut deps, project_dir)?;
         return Ok(deps);
     }
 
@@ -141,9 +148,126 @@ fn apply_git_declarations(deps: &mut Vec<NodeDep>, project_dir: &Path) -> Result
             local: None,
             path: None,
             git: Some(src),
+            tarball: None,
         });
     }
     Ok(())
+}
+
+/// Replace whatever the lockfile (or package.json) says about each tarball
+/// dependency (a dependency whose spec is an http(s) URL) by one tarball `NodeDep`.
+///
+/// npm's own lockfile records such a dependency with its URL as `resolved`, and
+/// a nested tree under `node_modules/<name>/node_modules/`; kong installs the
+/// tarball's own dependencies from the tarball's package.json instead, so those
+/// entries are dropped. Without any URL dependency `deps` is left untouched.
+fn apply_tarball_declarations(deps: &mut Vec<NodeDep>, project_dir: &Path) -> Result<()> {
+    let sources = tarball_declarations(project_dir)?;
+    if sources.is_empty() {
+        return Ok(());
+    }
+    for src in &sources {
+        let nested = format!("node_modules/{}/node_modules/", src.name);
+        deps.retain(|d| {
+            d.name != src.name && !d.path.as_deref().is_some_and(|p| p.starts_with(&nested))
+        });
+    }
+    debug!(tarballs = sources.len(), "Tarball dependencies replace their lockfile entries");
+    for src in sources {
+        deps.push(NodeDep {
+            name: src.name.clone(),
+            version: "0.0.0".into(),
+            _resolved: None,
+            _integrity: None,
+            os: Vec::new(),
+            cpu: Vec::new(),
+            libc: Vec::new(),
+            optional: false,
+            local: None,
+            path: None,
+            git: None,
+            tarball: Some(src),
+        });
+    }
+    Ok(())
+}
+
+/// Collect the tarball dependencies of the project: every dependency of the
+/// root `package.json` and of each workspace member's `package.json` whose
+/// value is an http(s) URL (not a git spec). Sorted by name. The same URL
+/// declared in two manifests is one dependency; two different URLs for one
+/// name are an error that names both manifests.
+pub fn tarball_declarations(project_dir: &Path) -> Result<Vec<TarballSource>> {
+    let root_path = project_dir.join("package.json");
+    if !root_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(&root_path)
+        .with_context(|| format!("Failed to read {}", root_path.display()))?;
+    let root: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {}", root_path.display()))?;
+
+    let mut manifests: Vec<(String, serde_json::Value)> = vec![("package.json".to_string(), root.clone())];
+    for member in workspace_members(project_dir, &root) {
+        let rel = format!("{member}/package.json");
+        let path = project_dir.join(&rel);
+        let parsed = std::fs::read_to_string(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).map_err(Into::into));
+        match parsed {
+            Ok(json) => manifests.push((rel, json)),
+            Err(e) => warn!(manifest = %rel, error = %e, "skipping unreadable workspace manifest"),
+        }
+    }
+
+    let mut sources: Vec<TarballSource> = Vec::new();
+    for (manifest, json) in &manifests {
+        for section in GIT_DEP_SECTIONS {
+            let Some(map) = json.get(section).and_then(|s| s.as_object()) else {
+                continue;
+            };
+            for (name, value) in map {
+                let Some(spec_str) = value.as_str().filter(|s| super::tarball::fetch::is_tarball_spec(s)) else {
+                    continue;
+                };
+                // A spec with userinfo is refused; its credential is never echoed.
+                let shown = super::tarball::fetch::mask_userinfo(spec_str);
+                let origin = format!("{manifest} {section} \"{name}\": \"{shown}\"");
+                let (url, declared) = super::tarball::fetch::parse_tarball_spec(spec_str).map_err(|e| {
+                    anyhow::anyhow!(
+                        "tarball dependency '{name}' has an invalid source:\n  \
+                         source      : {shown}\n  \
+                         declared by : {origin}\n\
+                         {e}"
+                    )
+                })?;
+                if let Some(prev) = sources.iter().find(|s| &s.name == name) {
+                    if prev.spec == spec_str {
+                        continue;
+                    }
+                    bail!(
+                        "tarball dependency '{name}' is declared with two different URLs:\n  \
+                         declared by : {}\n  \
+                         and by      : {origin}\n\
+                         Use one URL for it in every package.json (it is hoisted to the project's \
+                         node_modules/{name}).",
+                        prev.origin
+                    );
+                }
+                debug!(pkg = %name, manifest = %manifest, "kong tarball dependency declared");
+                sources.push(TarballSource {
+                    name: name.clone(),
+                    spec: spec_str.to_string(),
+                    url,
+                    declared,
+                    origin,
+                    declared_by: manifest.clone(),
+                });
+            }
+        }
+    }
+    sources.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(sources)
 }
 
 /// A local (`file:`/`link:`) dependency the MANIFEST declares with an ABSOLUTE
@@ -354,6 +478,7 @@ pub fn parse_package_lock(path: &Path) -> Result<Vec<NodeDep>> {
                         .to_string();
                     deps.push(NodeDep {
                         git: None,
+                        tarball: None,
                         path: None,
                         name,
                         version,
@@ -408,6 +533,7 @@ pub fn parse_package_lock(path: &Path) -> Result<Vec<NodeDep>> {
             if !version.is_empty() {
                 deps.push(NodeDep {
                     git: None,
+                    tarball: None,
                     path: nested_install_path(key),
                     name,
                     version,
@@ -465,6 +591,7 @@ fn parse_v1_level(
             if !is_tarball_path(p) {
                 out.push(NodeDep {
                     git: None,
+                    tarball: None,
                     path: None,
                     name: name.clone(),
                     version: "0.0.0".into(),
@@ -498,6 +625,7 @@ fn parse_v1_level(
         if !version.is_empty() {
             out.push(NodeDep {
                 git: None,
+                tarball: None,
                 path: if parent.is_some() {
                     Some(key.clone())
                 } else {
@@ -556,6 +684,7 @@ pub fn parse_package_json(path: &Path) -> Result<Vec<NodeDep>> {
                     }
                     deps.push(NodeDep {
                         git: None,
+                        tarball: None,
                         path: None,
                         name: name.clone(),
                         version: "0.0.0".into(),
@@ -582,6 +711,7 @@ pub fn parse_package_json(path: &Path) -> Result<Vec<NodeDep>> {
                 if !cleaned.is_empty() {
                     deps.push(NodeDep {
                         git: None,
+                        tarball: None,
                         path: None,
                         // package.json's dependency map carries no os/cpu/libc —
                         // those live in each dependency's own package.json, which
@@ -848,6 +978,7 @@ fn local_dep_from_link(
         .to_string();
     Some(NodeDep {
         git: None,
+        tarball: None,
         path: None,
         name: leaf_name(key),
         version,
@@ -1215,6 +1346,7 @@ mod tests {
     fn dep(name: &str, os: &[&str], cpu: &[&str], libc: &[&str], optional: bool) -> NodeDep {
         NodeDep {
             git: None,
+            tarball: None,
             path: None,
             name: name.into(),
             version: "1.0.0".into(),
@@ -1650,6 +1782,99 @@ mod tests {
         let direct = parse_package_lock(&tmp.path().join("package-lock.json")).unwrap();
         assert_eq!(summary(&deps), summary(&direct));
         assert!(deps.iter().all(|d| d.git.is_none()));
+    }
+
+    const URL_LOCK: &str = r#"{ "lockfileVersion": 3, "packages": {
+        "": { "name": "app", "dependencies": { "@fx/haa": "https://h.example/haa-0.1.0.tgz", "vue": "^3.5.0" } },
+        "node_modules/@fx/haa": { "version": "0.1.0", "resolved": "https://h.example/haa-0.1.0.tgz", "integrity": "sha512-AAAA" },
+        "node_modules/@fx/haa/node_modules/old": { "version": "1.0.0", "resolved": "https://registry.npmjs.org/old/-/old-1.0.0.tgz" },
+        "node_modules/vue": { "version": "3.5.0", "resolved": "https://registry.npmjs.org/vue/-/vue-3.5.0.tgz" } } }"#;
+
+    #[test]
+    fn tarball_declarations_from_root_and_workspace_member() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_manifest(
+            tmp.path(),
+            "package.json",
+            r#"{ "name": "mono", "workspaces": ["apps/*"],
+                 "dependencies": { "@fx/haa": "https://h.example/rel/haa-0.1.0.tgz#sha256=0000000000000000000000000000000000000000000000000000000000000000", "vue": "^3.5.0",
+                                   "@fx/git": "git+https://h.example/r.git", "bare": "https://h.example/r.git" } }"#,
+        );
+        write_manifest(
+            tmp.path(),
+            "apps/web/package.json",
+            r#"{ "name": "web", "devDependencies": { "@fx/raa": "http://127.0.0.1:9/raa.tgz",
+                 "@fx/haa": "https://h.example/rel/haa-0.1.0.tgz#sha256=0000000000000000000000000000000000000000000000000000000000000000" } }"#,
+        );
+        let srcs = tarball_declarations(tmp.path()).unwrap();
+        let names: Vec<&str> = srcs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["@fx/haa", "@fx/raa"], "git specs and ranges are not tarballs");
+        assert_eq!(srcs[0].url, "https://h.example/rel/haa-0.1.0.tgz");
+        assert!(srcs[0].declared.is_some());
+        assert_eq!(srcs[0].declared_by, "package.json");
+        assert_eq!(srcs[1].declared_by, "apps/web/package.json");
+        assert_eq!(
+            srcs[1].origin,
+            r#"apps/web/package.json devDependencies "@fx/raa": "http://127.0.0.1:9/raa.tgz""#
+        );
+    }
+
+    #[test]
+    fn one_name_with_two_different_urls_is_an_error_naming_both_manifests() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_manifest(
+            tmp.path(),
+            "package.json",
+            r#"{ "workspaces": ["a"], "dependencies": { "x": "https://h/x-1.tgz" } }"#,
+        );
+        write_manifest(tmp.path(), "a/package.json", r#"{ "dependencies": { "x": "https://h/x-2.tgz" } }"#);
+        let err = tarball_declarations(tmp.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("declared with two different URLs") && err.contains("a/package.json"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn invalid_tarball_specs_name_the_dependency_and_the_manifest() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_manifest(
+            tmp.path(),
+            "package.json",
+            r#"{ "dependencies": { "x": "https://user:pw@h/x.tgz" } }"#,
+        );
+        let err = tarball_declarations(tmp.path()).unwrap_err().to_string();
+        assert!(err.contains("tarball dependency 'x'") && err.contains("credentials"), "{err}");
+        assert!(!err.contains("pw@") && err.contains("https://***@h/x.tgz"), "{err}");
+    }
+
+    #[test]
+    fn tarball_declaration_replaces_lockfile_entries_and_works_without_a_lockfile() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_manifest(
+            tmp.path(),
+            "package.json",
+            r#"{ "name": "app", "dependencies": { "@fx/haa": "https://h.example/haa-0.1.0.tgz", "vue": "^3.5.0" } }"#,
+        );
+        let deps = parse_all(tmp.path()).unwrap();
+        let haa: Vec<_> = deps.iter().filter(|d| d.name == "@fx/haa").collect();
+        assert_eq!(haa.len(), 1);
+        assert!(haa[0].tarball.is_some() && haa[0].git.is_none() && haa[0].local.is_none());
+
+        write_manifest(tmp.path(), "package-lock.json", URL_LOCK);
+        let deps = parse_all(tmp.path()).unwrap();
+        let names: Vec<(&str, bool)> = deps.iter().map(|d| (d.name.as_str(), d.tarball.is_some())).collect();
+        assert!(names.contains(&("@fx/haa", true)) && names.contains(&("vue", false)), "{names:?}");
+        assert_eq!(deps.iter().filter(|d| d.name == "@fx/haa").count(), 1);
+        assert!(!deps.iter().any(|d| d.name == "old"), "its nested lockfile tree is dropped");
+    }
+
+    #[test]
+    fn project_without_url_dependencies_has_no_tarballs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_manifest(tmp.path(), "package.json", r#"{ "dependencies": { "vue": "^3.5.0" } }"#);
+        assert!(tarball_declarations(tmp.path()).unwrap().is_empty());
+        assert!(parse_all(tmp.path()).unwrap().iter().all(|d| d.tarball.is_none()));
     }
 
     #[test]

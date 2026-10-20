@@ -388,7 +388,7 @@ fn adopt_node(project_dir: &Path, store_root: &Path) -> Result<Option<NodeSectio
     if packages.is_empty() {
         return Ok(None);
     }
-    Ok(Some(NodeSection { packages, local: Vec::new(), git: Vec::new() }))
+    Ok(Some(NodeSection { packages, local: Vec::new(), git: Vec::new(), tarballs: Vec::new() }))
 }
 
 /// Copy one installed Node package into the store under the `package/`
@@ -729,6 +729,34 @@ pub(crate) fn solidify_node(
         solidify_git_entry(nm_dir, entry, store_root)?;
     }
 
+    // Tarball dependencies become real directories too: the package with its
+    // own node_modules, copied out of the assembled tree.
+    for entry in &node.tarballs {
+        solidify_tarball_entry(nm_dir, entry, store_root)?;
+    }
+
+    Ok(())
+}
+
+/// Copy one tarball dependency into `nm/<name>` as real files (hard links in
+/// the store tree are plain files for the copy).
+fn solidify_tarball_entry(
+    nm_dir: &Path,
+    entry: &config::TarballPackageEntry,
+    store_root: &Path,
+) -> Result<()> {
+    let dst = nm_dir.join(&entry.name);
+    remove_link_or_dir(&dst)?;
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let src = crate::node::tarball::tarball_link_target(store_root, entry);
+    if !src.is_dir() {
+        warn!(pkg = %entry.name, path = %src.display(), "Tarball tree missing in store, skipping");
+        return Ok(());
+    }
+    copy_dir_recursive(&src, &dst)?;
+    debug!(pkg = %entry.name, "Copied tarball dependency into node_modules");
     Ok(())
 }
 
@@ -868,6 +896,27 @@ fn ecosystem_for_store_path(store_path: &str) -> String {
     store_path.split('/').next().unwrap_or("unknown").to_string()
 }
 
+/// Usage-index key of one recorded package. A package that is itself a tarball
+/// (it lives under `node/tarballs/`) is keyed by URL and integrity like a direct
+/// tarball dependency, so a project that only reaches it through another
+/// tarball and a project that depends on it directly share one key.
+fn package_usage_key(pkg: &config::PackageEntry) -> (String, String, String) {
+    if pkg.store_path.starts_with("node/tarballs/") {
+        if let (Some(url), Some(hash)) = (&pkg.source_url, &pkg.hash) {
+            return ("node-tarball".into(), url.clone(), hash.clone());
+        }
+    }
+    (ecosystem_for_store_path(&pkg.store_path), pkg.name.clone(), pkg.version.clone())
+}
+
+/// `node/tarballs/<name>/<sha>/tree-<deps>` -> `node/tarballs/<name>/<sha>`.
+fn tarball_store_dir(tree: &str) -> &str {
+    match tree.rsplit_once('/') {
+        Some((dir, last)) if last.starts_with("tree-") => dir,
+        _ => tree,
+    }
+}
+
 /// Build a deps → projects usage index.
 ///
 /// A git dependency is keyed by `("node-git", repo, commit)` because its
@@ -898,9 +947,13 @@ pub(crate) fn build_dep_index(
         }
         if let Some(ref node) = rules.node {
             let git_packages = node.git.iter().flat_map(|e| e.packages.iter());
-            for pkg in node.packages.iter().chain(git_packages) {
+            let tarball_packages = node.tarballs.iter().flat_map(|e| e.packages.iter());
+            for pkg in node.packages.iter().chain(git_packages).chain(tarball_packages) {
+                index.entry(package_usage_key(pkg)).or_default().push(proj_name.clone());
+            }
+            for entry in &node.tarballs {
                 index
-                    .entry(("node".into(), pkg.name.clone(), pkg.version.clone()))
+                    .entry(("node-tarball".into(), entry.url.clone(), entry.integrity.clone()))
                     .or_default()
                     .push(proj_name.clone());
             }
@@ -945,16 +998,24 @@ pub(crate) fn exclusive_store_paths(
     };
 
     let git = rules.node.as_ref().map(|s| &s.git[..]).unwrap_or(&[]);
+    let tarballs = rules.node.as_ref().map(|s| &s.tarballs[..]).unwrap_or(&[]);
     let all_packages = rules.python.as_ref().map(|s| &s.packages[..]).unwrap_or(&[])
         .iter()
         .chain(rules.node.as_ref().map(|s| &s.packages[..]).unwrap_or(&[]).iter())
         .chain(git.iter().flat_map(|e| e.packages.iter()))
+        .chain(tarballs.iter().flat_map(|e| e.packages.iter()))
         .chain(rules.rust.as_ref().map(|s| &s.packages[..]).unwrap_or(&[]).iter());
 
     for pkg in all_packages {
-        let eco = ecosystem_for_store_path(&pkg.store_path);
-        if users((eco, pkg.name.clone(), pkg.version.clone())) <= 1 {
+        if users(package_usage_key(pkg)) <= 1 {
             push(&pkg.store_path);
+        }
+    }
+    // A tarball dependency owns its whole store directory (extracted package and
+    // every assembled tree); the trees only mean something for that file.
+    for entry in tarballs {
+        if users(("node-tarball".into(), entry.url.clone(), entry.integrity.clone())) <= 1 {
+            push(tarball_store_dir(&entry.store_path));
         }
     }
     for entry in git {
@@ -1568,7 +1629,7 @@ mod tests {
             }],
             local: Vec::new(),
         };
-        let node = NodeSection { packages: Vec::new(), local: Vec::new(), git: vec![entry] };
+        let node = NodeSection { packages: Vec::new(), local: Vec::new(), git: vec![entry], tarballs: Vec::new() };
 
         let nm = project.path().join("node_modules");
         solidify_node(&nm, project.path(), &node, s).unwrap();
@@ -1634,7 +1695,7 @@ mod tests {
             generated: "now".into(),
             runtimes: None,
             python: None,
-            node: Some(NodeSection { packages: Vec::new(), local: Vec::new(), git }),
+            node: Some(NodeSection { packages: Vec::new(), local: Vec::new(), git, tarballs: Vec::new() }),
             rust: None,
             brew: None,
             scripts: Default::default(),
@@ -1676,5 +1737,96 @@ mod tests {
         assert!(!only_a.exists(), "exclusive inner package must be removed");
         assert!(c1_dir.join(".kong-cloned").is_file(), "shared commit dir must remain");
         assert!(shared.join("package/index.js").is_file(), "shared inner package must remain");
+    }
+
+    fn tarball_fixture(
+        store: &Path,
+        deps_key: &str,
+    ) -> (config::TarballPackageEntry, PathBuf) {
+        let rel = "node/tarballs/@fx+haa/aaaaaaaaaaaa".to_string();
+        let tree = format!("{rel}/tree-{deps_key}");
+        let package = store.join(&tree).join("package");
+        std::fs::create_dir_all(package.join("node_modules/leaf")).unwrap();
+        std::fs::write(package.join("package.json"), r#"{"name":"@fx/haa","version":"0.1.0"}"#).unwrap();
+        std::fs::write(package.join("index.js"), "module.exports = 'haa';\n").unwrap();
+        std::fs::write(package.join("node_modules/leaf/index.js"), "module.exports = 'leaf';\n").unwrap();
+        std::fs::write(store.join(&tree).join(".kong-installed"), "{}").unwrap();
+        std::fs::write(store.join(&rel).join(".kong-fetched"), "{}").unwrap();
+        let entry = config::TarballPackageEntry {
+            name: "@fx/haa".into(),
+            version: "0.1.0".into(),
+            source: "https://h.example/haa.tgz".into(),
+            url: "https://h.example/haa.tgz".into(),
+            integrity: "sha512-AAAA".into(),
+            declared_by: "package.json".into(),
+            store_path: tree,
+            packages: Vec::new(),
+        };
+        (entry, store.join(rel))
+    }
+
+    /// Solidify copies a tarball dependency as a real directory, with its own
+    /// node_modules, and leaves the store untouched.
+    #[test]
+    fn solidify_copies_tarball_dep_as_real_dir() {
+        let store = tempfile::TempDir::new().unwrap();
+        let project = tempfile::TempDir::new().unwrap();
+        let (entry, _) = tarball_fixture(store.path(), "12345678");
+        let node = NodeSection { packages: Vec::new(), local: Vec::new(), git: Vec::new(), tarballs: vec![entry] };
+        let nm = project.path().join("node_modules");
+        solidify_node(&nm, project.path(), &node, store.path()).unwrap();
+
+        let dep = nm.join("@fx/haa");
+        let meta = std::fs::symlink_metadata(&dep).unwrap();
+        assert!(meta.is_dir() && !meta.file_type().is_symlink(), "must be a real dir");
+        #[cfg(windows)]
+        assert!(!junction::exists(&dep).unwrap_or(false), "must not be a junction");
+        assert!(dep.join("index.js").is_file());
+        assert!(dep.join("node_modules/leaf/index.js").is_file());
+        // Running it twice is fine, and the store keeps its tree.
+        solidify_node(&nm, project.path(), &node, store.path()).unwrap();
+        assert!(store.path().join("node/tarballs/@fx+haa/aaaaaaaaaaaa/tree-12345678/package/index.js").is_file());
+    }
+
+    /// Eject removes a tarball directory only this project uses (every assembled
+    /// tree with it) and keeps one another project is locked to.
+    #[test]
+    fn eject_removes_exclusive_tarball_dir_and_keeps_shared() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = tempfile::TempDir::new().unwrap();
+        let rules = |project: &str, tarballs: Vec<config::TarballPackageEntry>| KongRules {
+            version: 1,
+            project: project.into(),
+            generated: "now".into(),
+            runtimes: None,
+            python: None,
+            node: Some(NodeSection { packages: Vec::new(), local: Vec::new(), git: Vec::new(), tarballs }),
+            rust: None,
+            brew: None,
+            scripts: Default::default(),
+            services: Vec::new(),
+        };
+        let (entry, dir) = tarball_fixture(store.path(), "12345678");
+        // Another tree of the same file, built for another project.
+        let (entry_b, _) = tarball_fixture(store.path(), "87654321");
+        let a = rules("a", vec![entry.clone()]);
+        let b = rules("b", vec![entry_b]);
+        let (a_dir, b_dir) = (tmp.path().join("a"), tmp.path().join("b"));
+        for (d, r) in [(&a_dir, &a), (&b_dir, &b)] {
+            std::fs::create_dir_all(d).unwrap();
+            config::write_rules(r, &d.join("kong.rules")).unwrap();
+        }
+
+        // Shared with b: kept.
+        let index = build_dep_index(&[("a".into(), a_dir.clone()), ("b".into(), b_dir.clone())]);
+        let paths = exclusive_store_paths(&a, &index);
+        assert!(paths.is_empty(), "{paths:?}");
+
+        // Alone: the whole tarball directory goes, trees included.
+        let index = build_dep_index(&[("a".into(), a_dir.clone())]);
+        let paths = exclusive_store_paths(&a, &index);
+        assert_eq!(paths, vec!["node/tarballs/@fx+haa/aaaaaaaaaaaa".to_string()]);
+        assert_eq!(remove_store_entries(store.path(), &paths).unwrap(), 1);
+        assert!(!dir.exists());
     }
 }
