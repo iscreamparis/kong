@@ -8,6 +8,20 @@ and KONG adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Tarball dependencies (install a built release).** A dependency whose spec is an http(s) tarball URL
+  (for example a GitHub Release asset made by `npm pack`) is downloaded once into the store
+  (`node/tarballs/<name>/<sha512 12 hex>/`), integrity-checked, extracted and linked at
+  `node_modules/<name>`: no clone, no build, no `kong.git` block. `kong.rules` records the URL, the
+  version and a `sha512` under `node.tarballs`; a `#sha256=<hex>` / `#sha512-<base64>` fragment in the
+  spec is verified (a mismatch is a hard error), otherwise the first run records it (trust on first
+  use) and later runs enforce it. A re-run with an unchanged lock does no network. The tarball's own
+  `dependencies`, `optionalDependencies` and required `peerDependencies` are resolved from its
+  `package.json` like registry packages into a flat tree next to it; a dependency that is itself a
+  tarball URL joins the tree. Works for scoped names, any package folder name and workspace members;
+  `kong solidify` / `kong eject` handle it. Private GitHub release assets use the `kong.git`
+  credentials (`KONG_GIT_TOKEN`, `GITHUB_TOKEN` / `GH_TOKEN`), sent as a Bearer header to the original
+  host only (never to a redirect target, never over plain http), never written anywhere. Git
+  dependencies stay as the fallback for source-only dependencies.
 - **Offline Cargo registry and shared build cache.** `kong use` vendors the crates of `Cargo.lock` from
   the store, points Cargo at them with a per-env `CARGO_HOME`, and shares one `CARGO_TARGET_DIR` between
   worktrees with the same lockfile. New `kong env` prints the variables (`eval "$(kong env)"`; PowerShell

@@ -296,6 +296,39 @@ Build failures append `last lines of the log:` followed by the last 20 lines of 
 
 **`kong env [--path P] [--shell sh|ps1]`.** Prints the same variables as `export K='V'` lines (or PowerShell assignments) on stdout, while logs go to stderr. A project without a Rust section gets empty output.
 
+## Node tarball dependencies
+
+A dependency whose `package.json` value is an http(s) URL (not a git spec) is a tarball dependency: the
+better path for a module that publishes built releases. Code: `src/node/tarball/` (`fetch.rs` download,
+credentials, safe extraction and the store; `resolve.rs` + `semver.rs` the flat resolver; `mod.rs`
+`prepare_all`, the assembled tree and `check_prepared`; `tests.rs` the local-http-server tests), plus
+`parser::tarball_declarations`, `config::TarballPackageEntry` (`node.tarballs`),
+`modules::link_tarball_packages`, `migrate` (solidify, eject) and `gitdep::auth::http_token_for`.
+
+- **Declaration.** Read from the root `package.json` and each workspace member (all three dependency
+  sections). `#sha256=<hex>`, `#sha512=<hex>`, `#sha256-<b64>` and `#sha512-<b64>` fragments declare an
+  integrity; any other fragment, and userinfo in the URL, are errors. The lockfile entries of the name
+  (and its nested tree) are dropped, like for git.
+- **Store.** `node/tarballs/<name with / as +>/<sha512 12 hex>/` holds the extracted file and a
+  `.kong-fetched` marker (url, sha256, sha512). It is written to a temp sibling and renamed, so an
+  existing directory is complete. `tree-<deps hash>/package/` is a hard-linked copy of the package
+  next to its `node_modules` (built with `build_node_modules`) and a `.kong-installed` marker; the
+  deps hash is over the resolved package set, so two resolutions never share a tree. Extraction uses
+  `unpack_in` (a path that escapes is an error) and skips symlinks and hard links.
+- **Integrity.** Expected = the declared one if any, else the one recorded in the previous
+  `kong.rules` entry (same name and URL), else trust on first use. With a recorded one and a complete
+  store directory there is no network. A mismatch is a hard error naming expected and actual.
+- **Resolution.** `requirements()` reads `dependencies`, `optionalDependencies` and required
+  `peerDependencies`; the registry packument is the abbreviated install document; a version is the
+  dist-tag, else `latest` when it satisfies, else the highest satisfying one; placement hoists the
+  first version of a name to the top and nests a conflicting one under its requester. A previous
+  `kong.rules` entry with the same integrity reuses its packages and asks the registry nothing.
+- **Credentials.** `http_token_for`: `KONG_GIT_TOKEN` (any https host), else `GITHUB_TOKEN`, else
+  `GH_TOKEN` (`github.com` only), never for `http://`. The token travels in `Authorization: Bearer` to
+  the original origin only; redirects are followed manually and drop it; a redirect that downgrades
+  https to http is refused; nothing is printed that came from a redirect.
+- **Tests.** Local http server, no real network: `cargo test --no-default-features node::tarball`.
+
 ## Module ownership
 
 | Module | Milestone | Files |

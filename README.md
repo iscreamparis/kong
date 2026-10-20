@@ -255,7 +255,75 @@ what npm does with its default `install-links=false` — so edits to the local p
   absolute `file:`/`link:` path, `kong rules` uses it; a relative one keeps the lockfile's path.
 - `kong solidify` keeps local packages linked (a copy would freeze live source).
 
+### Tarball dependencies (install a built release)
+
+The better path for a module that publishes built releases: a dependency whose spec is an
+**http(s) tarball URL** (typically a GitHub Release asset made by `npm pack`) is downloaded **once**
+into the store, integrity-checked, extracted and linked at `node_modules/<name>`. **No clone, no build,
+no project-specific code or branch**: the game imports each module already built. No `kong.git` block
+is needed: the URL in the dependency value is enough.
+
+```json
+{
+  "dependencies": {
+    "@etcito/haa": "https://github.com/Etcito/haa/releases/download/v0.1.0/etcito-haa-0.1.0.tgz",
+    "@etcito/raa": "https://github.com/Etcito/raa/releases/download/v0.3.0/etcito-raa-0.3.0.tgz#sha256=<64 hex>"
+  }
+}
+```
+
+- **Where declared:** `dependencies`, `devDependencies` or `optionalDependencies` of the root
+  `package.json` and of each workspace member (like `kong.git`); linked at the project's top-level
+  `node_modules/<name>`. Scoped names work, and so does a tarball whose package folder is `package/`
+  or any other single top-level folder. The same name with two different URLs is an error.
+- **Integrity.** `kong.rules` records the URL, the version (from the tarball's `package.json`) and a
+  `sha512-<base64>` of the file under `node.tarballs`. A `#sha256=<hex>`, `#sha512=<hex>`,
+  `#sha256-<base64>` or `#sha512-<base64>` fragment in the spec is verified, and a mismatch is a hard
+  error (the message shows expected and actual). Without a declared one the first run records it
+  (trust on first use) and every later run enforces it, from the store or after a new download.
+- **Own dependencies.** There is no lockfile in a tarball, so its `dependencies`,
+  `optionalDependencies` and required `peerDependencies` (installed automatically, as npm 7+ does;
+  `peerDependenciesMeta` optional ones are not) are resolved from its `package.json` against the npm
+  registry (highest satisfying version, `latest` preferred when it satisfies; a host-incompatible
+  optional one is skipped) into a flat npm-style tree: one version hoisted, a conflicting one nested.
+  A dependency that is itself a tarball URL is fetched the same way and joins the tree. The resolved
+  packages are recorded in `kong.rules`; they come from the shared `node/libs` store.
+- **Lock semantics.** A re-run with an unchanged `kong.rules` does **no network** (no download, no
+  registry lookup). Change the URL (a new release) to get a new entry; to re-pin the same URL, delete
+  its entry from `kong.rules`. Nothing needs `--update-git`.
+- **Store layout:**
+  ```
+  <store>/node/tarballs/<name>/<sha512 12 hex>/      the extracted file (package/…) + .kong-fetched marker
+  <store>/node/tarballs/<name>/<sha512 12 hex>/tree-<deps hash>/package/   hard-linked copy + node_modules
+  ```
+  `node_modules/<name>` links to `tree-*/package` (a junction or symlink: Node resolves the real path,
+  where the package's own `node_modules` lives). Two projects that resolved different dependency
+  versions get two `tree-*` directories and never disturb each other.
+- **Private GitHub release assets.** The same credentials as `kong.git`: `KONG_GIT_TOKEN` for any
+  https host, `GITHUB_TOKEN` then `GH_TOKEN` for `github.com` only. The token is sent as
+  `Authorization: Bearer <token>` on the first request, to the URL's own host only; redirects (GitHub
+  sends the asset to a signed URL on another host) are followed by KONG without the header, and an
+  https download is never downgraded to http. The token is never sent over plain `http://`, and is
+  never in a command line, a URL, `kong.rules`, a path, a marker or a log line; errors are redacted
+  and signed redirect URLs are not printed. There are no prompts: without a credential a private
+  asset fails at once (`HTTP 404 ... no credential was sent: set KONG_GIT_TOKEN, or GITHUB_TOKEN /
+  GH_TOKEN for github.com`). A user:password@ in the URL is refused.
+- **`kong solidify`** copies a tarball dependency (with its own `node_modules`) as a real directory;
+  **`kong eject`** removes a tarball directory only this project uses and keeps one another project is
+  locked to.
+- **Limits:** a tarball's own dependencies must be registry ranges, dist-tags or tarball URLs (`npm:`
+  aliases, `file:`, `workspace:` and git specs inside a tarball's `package.json` are refused with a
+  message naming the package); the resolver is a small flat one, not a full SAT solver; a required
+  peer is installed inside the tarball's own tree, so a peer that must be the *same instance* as the
+  project's (a UI framework, say) is a duplicate: keep such a peer out of the tarball's
+  `dependencies` and let the consumer bundle it; no `--update` flag yet. Use **git dependencies** (below)
+  as the fallback for a dependency that only exists as source.
+
 ### Git dependencies (`kong.git`)
+
+> Prefer a [tarball dependency](#tarball-dependencies-install-a-built-release) when the module publishes
+> a built release: it needs no clone and no build. Git dependencies remain the fallback for a
+> dependency that is only available as source.
 
 A Node dependency declared as a standard npm git spec **and** named in a top-level `kong.git` block of
 the same `package.json` is cloned once into the store, has its own dependencies installed from its
