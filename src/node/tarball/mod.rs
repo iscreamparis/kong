@@ -51,6 +51,21 @@ pub struct PrepareOptions<'a> {
     pub registry: &'a dyn Fn(&str) -> Result<resolve::Packument>,
     /// Tests only: allow sending a token over plain http to the local test server.
     pub allow_plain_http_token: bool,
+    /// The credential git (or gh) holds for a host, asked only after an anonymous refusal.
+    pub credential_for: &'a dyn Fn(&str) -> Option<crate::gitdep::credential::Credential>,
+    /// Tests only: `(host, api base)` standing in for github.com / api.github.com.
+    pub github_override: Option<(&'a str, &'a str)>,
+}
+
+impl<'a> PrepareOptions<'a> {
+    fn net(&'a self, token: Option<&'a str>) -> fetch::Net<'a> {
+        fetch::Net {
+            token,
+            credential_for: self.credential_for,
+            allow_plain_http_token: self.allow_plain_http_token,
+            github_override: self.github_override,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -181,9 +196,8 @@ impl resolve::Env for PrepEnv<'_> {
             name,
             &url,
             &Expect { declared, recorded },
-            token.as_deref(),
+            &self.opts.net(token.as_deref()),
             self.opts.force,
-            self.opts.allow_plain_http_token,
         )
         .map_err(|e| {
             anyhow::anyhow!(redact(
@@ -244,9 +258,8 @@ fn prepare_one(
         &src.name,
         &src.url,
         &expect,
-        token.as_deref(),
+        &opts.net(token.as_deref()),
         opts.force,
-        opts.allow_plain_http_token,
     )
     .map_err(|e| {
         tb_error(
@@ -383,9 +396,8 @@ fn ensure_listed_packages(
                     &pkg.name,
                     url,
                     &Expect { declared: None, recorded: pkg.hash.as_deref().and_then(Integrity::parse) },
-                    token.as_deref(),
+                    &opts.net(token.as_deref()),
                     opts.force,
-                    opts.allow_plain_http_token,
                 )
                 .map(|p| {
                     if p.downloaded {

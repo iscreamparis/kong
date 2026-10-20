@@ -674,6 +674,8 @@ pub fn generate_rules_with_options(project_dir: &Path, opts: &RulesOptions) -> R
                 token_for: &token_for,
                 registry: &registry,
                 allow_plain_http_token: false,
+                credential_for: &crate::gitdep::credential::machine_credential,
+                github_override: None,
             };
             let (entries, report) = crate::node::tarball::prepare_all(
                 &store_root, &tarball_sources, &previous, &prepare_opts,

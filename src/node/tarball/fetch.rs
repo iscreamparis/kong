@@ -12,6 +12,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256, Sha512};
 use tracing::{debug, info, warn};
 
+use crate::gitdep::credential::Credential;
+
 // ── Integrity ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,6 +205,34 @@ fn origin_of(u: &reqwest::Url) -> (String, String, Option<u16>) {
     )
 }
 
+/// An HTTP status the server answered, kept typed so callers can retry with a credential.
+#[derive(Debug)]
+pub(crate) struct HttpStatus {
+    pub code: u16,
+    pub message: String,
+}
+
+impl std::fmt::Display for HttpStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for HttpStatus {}
+
+fn is_auth_failure(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<HttpStatus>().is_some_and(|s| matches!(s.code, 401 | 403 | 404))
+}
+
+fn client() -> Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .user_agent("kong-dependency-manager/0.1")
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(600))
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("failed to build the HTTP client")
+}
+
 /// GET `url` and return the body. `token`, when given, is sent as
 /// `Authorization: Bearer <token>` to the ORIGINAL origin only and only over
 /// https: redirects are followed by hand and never carry the header to another
@@ -210,13 +240,12 @@ fn origin_of(u: &reqwest::Url) -> (String, String, Option<u16>) {
 /// URL on another host). `token_over_plain_http` is false everywhere but in the
 /// tests, which can only reach a local http server.
 pub(crate) fn get_with(url: &str, token: Option<&str>, token_over_plain_http: bool) -> Result<Vec<u8>> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("kong-dependency-manager/0.1")
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(600))
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .build()
-        .context("failed to build the HTTP client")?;
+    get_auth(url, token.map(|t| format!("Bearer {t}")).as_deref(), token_over_plain_http)
+}
+
+/// Like `get_with` with a ready `Authorization` header value.
+fn get_auth(url: &str, authorization: Option<&str>, token_over_plain_http: bool) -> Result<Vec<u8>> {
+    let client = client()?;
     let first = reqwest::Url::parse(url).with_context(|| format!("invalid URL {url}"))?;
     let first_origin = origin_of(&first);
     let mut current = first.clone();
@@ -224,9 +253,9 @@ pub(crate) fn get_with(url: &str, token: Option<&str>, token_over_plain_http: bo
         let mut req = client.get(current.clone()).header("Accept", "application/octet-stream");
         let same_origin = origin_of(&current) == first_origin;
         let may_send = same_origin && (current.scheme() == "https" || token_over_plain_http);
-        let sent_token = match (token, may_send) {
-            (Some(t), true) => {
-                req = req.header("Authorization", format!("Bearer {t}"));
+        let sent_token = match (authorization, may_send) {
+            (Some(a), true) => {
+                req = req.header("Authorization", a);
                 true
             }
             _ => false,
@@ -259,17 +288,21 @@ pub(crate) fn get_with(url: &str, token: Option<&str>, token_over_plain_http: bo
         if !status.is_success() {
             let note = if matches!(status.as_u16(), 401 | 403 | 404) {
                 if sent_token {
-                    " (a credential from the environment was sent and refused or the file does not exist)"
-                } else if token.is_some() {
-                    " (a credential is set but was not sent: https is required)"
+                    " (a credential was sent and refused or the file does not exist)"
+                } else if authorization.is_some() {
+                    " (a credential is available but was not sent: https is required)"
                 } else {
-                    " (no credential was sent: for a private asset set KONG_GIT_TOKEN, or \
-                     GITHUB_TOKEN / GH_TOKEN for github.com; otherwise the URL does not exist)"
+                    " (no credential was sent: for a private asset log in with git (Git Credential Manager \
+                     or any credential helper) or `gh auth login`, or set KONG_GIT_TOKEN, or GITHUB_TOKEN / \
+                     GH_TOKEN for github.com; otherwise the URL does not exist)"
                 }
             } else {
                 ""
             };
-            bail!("HTTP {status} from {}{note}", host_of(&current));
+            return Err(anyhow::Error::new(HttpStatus {
+                code: status.as_u16(),
+                message: format!("HTTP {status} from {}{note}", host_of(&current)),
+            }));
         }
         let mut body = Vec::new();
         let mut resp = resp;
@@ -278,6 +311,192 @@ pub(crate) fn get_with(url: &str, token: Option<&str>, token_over_plain_http: bo
         return Ok(body);
     }
     bail!("too many redirects (more than {MAX_REDIRECTS}) starting from {}", host_of(&first))
+}
+
+// ── Authentication policy ───────────────────────────────────────────────────
+
+/// How a download may authenticate.
+pub struct Net<'a> {
+    /// A token from the environment (KONG_GIT_TOKEN, GITHUB_TOKEN, GH_TOKEN): wins over everything.
+    pub token: Option<&'a str>,
+    /// The credential git (or gh) holds for a host; asked lazily, only after an anonymous refusal.
+    pub credential_for: &'a dyn Fn(&str) -> Option<Credential>,
+    /// Tests only: allow sending credentials over plain http to the local test server.
+    pub allow_plain_http_token: bool,
+    /// Tests only: `(host, api base)` standing in for github.com / api.github.com.
+    pub github_override: Option<(&'a str, &'a str)>,
+}
+
+type ReleaseRef = (String, String, String, String, String);
+
+/// `(api base, owner, repo, tag, asset name)` of a GitHub release-download URL.
+fn github_release(url: &str, net: &Net<'_>) -> Option<ReleaseRef> {
+    let u = reqwest::Url::parse(url).ok()?;
+    let host_port = match u.port() {
+        Some(p) => format!("{}:{p}", u.host_str()?.to_ascii_lowercase()),
+        None => u.host_str()?.to_ascii_lowercase(),
+    };
+    let api = if u.scheme() == "https" && host_port == "github.com" {
+        "https://api.github.com".to_string()
+    } else if let Some((h, api)) = net.github_override {
+        (host_port == h.to_ascii_lowercase()).then(|| api.trim_end_matches('/').to_string())?
+    } else {
+        return None;
+    };
+    let seg: Vec<&str> = u.path_segments()?.collect();
+    match seg.as_slice() {
+        [owner, repo, "releases", "download", tag, asset] if !asset.is_empty() => {
+            Some((api, owner.to_string(), repo.to_string(), tag.to_string(), asset.to_string()))
+        }
+        _ => None,
+    }
+}
+
+fn authorization_for(cred: &Credential, github: bool) -> String {
+    match (&cred.username, github) {
+        (Some(u), false) => format!("Basic {}", b64_encode(format!("{u}:{}", cred.password).as_bytes())),
+        _ => format!("Bearer {}", cred.password),
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Some(v) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Download a private release asset through the REST API (a bearer token is not
+/// accepted on the `releases/download/...` URL): resolve the asset by tag and name,
+/// then ask for `application/octet-stream`; the redirect to the signed URL is
+/// followed WITHOUT the Authorization header.
+fn github_api_download(rel: ReleaseRef, authorization: &str, plain_ok: bool) -> Result<Vec<u8>> {
+    let (api, owner, repo, tag, asset) = rel;
+    let client = client()?;
+    if api.starts_with("http://") && !plain_ok {
+        bail!("refusing to send a credential to {api} over plain http");
+    }
+    let api_get = |url: &str, accept: &str| -> Result<reqwest::blocking::Response> {
+        client
+            .get(url)
+            .header("Accept", accept)
+            .header("Authorization", authorization)
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .map_err(|e| anyhow!("GitHub API request failed: {}", e.without_url()))
+    };
+    let check = |resp: &reqwest::blocking::Response, what: &str| -> Result<()> {
+        let st = resp.status();
+        if st.is_success() || st.is_redirection() {
+            return Ok(());
+        }
+        let note = match st.as_u16() {
+            401 | 403 => " (the credential was refused: it needs read access to the repository's releases, scope `repo`)",
+            404 => " (release or repository not found, or the credential cannot see this private repository)",
+            _ => "",
+        };
+        Err(anyhow::Error::new(HttpStatus {
+            code: st.as_u16(),
+            message: format!("HTTP {st} from the GitHub API while {what}{note}"),
+        }))
+    };
+    let resp = api_get(&format!("{api}/repos/{owner}/{repo}/releases/tags/{tag}"), "application/vnd.github+json")?;
+    check(&resp, "resolving the release")?;
+    let release: serde_json::Value = resp.json().context("the GitHub API returned an unreadable release")?;
+    let wanted = percent_decode(&asset);
+    let id = release
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .and_then(|a| {
+            a.iter()
+                .find(|x| x.get("name").and_then(|n| n.as_str()).is_some_and(|n| n == wanted || n == asset))
+        })
+        .and_then(|x| x.get("id").and_then(|i| i.as_u64()))
+        .ok_or_else(|| anyhow!("release {tag} of {owner}/{repo} has no asset named '{wanted}'"))?;
+    let resp = api_get(&format!("{api}/repos/{owner}/{repo}/releases/assets/{id}"), "application/octet-stream")?;
+    check(&resp, "downloading the asset")?;
+    if resp.status().is_redirection() {
+        let loc = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| anyhow!("the GitHub API redirected without a Location header"))?
+            .to_string();
+        // The signed URL carries its own authorization: never send ours there.
+        return get_auth(&loc, None, plain_ok);
+    }
+    let mut body = Vec::new();
+    let mut resp = resp;
+    resp.read_to_end(&mut body).map_err(|e| anyhow!("failed to read the asset: {e}"))?;
+    Ok(body)
+}
+
+fn host_name_of(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+        .unwrap_or_default()
+}
+
+fn scrub(e: anyhow::Error, secrets: &[String]) -> anyhow::Error {
+    let mut m = format!("{e:#}");
+    for s in secrets.iter().filter(|s| !s.is_empty()) {
+        m = m.replace(s.as_str(), "***");
+    }
+    match e.downcast::<HttpStatus>() {
+        Ok(h) => anyhow::Error::new(HttpStatus { code: h.code, message: m }),
+        Err(_) => anyhow!(m),
+    }
+}
+
+/// Download `url`, authenticating as little and as late as possible:
+/// 1. a GitHub release URL: anonymous first (public repos need nothing), then the
+///    REST API with the environment token or the credential git holds;
+/// 2. any other URL with an environment token: sent to the original origin (https);
+/// 3. any other URL: anonymous first, then once with the credential git holds.
+pub(crate) fn get_authed(url: &str, net: &Net<'_>) -> Result<Vec<u8>> {
+    let plain = net.allow_plain_http_token;
+    let https = url.starts_with("https://") || plain;
+    let env_secrets: Vec<String> = net.token.map(String::from).into_iter().collect();
+    if let Some(rel) = github_release(url, net) {
+        let first_err = match get_auth(url, None, false) {
+            Ok(b) => return Ok(b),
+            Err(e) if is_auth_failure(&e) => e,
+            Err(e) => return Err(e),
+        };
+        let cred = if net.token.is_some() || !https { None } else { (net.credential_for)(&host_name_of(url)) };
+        let auth = match (net.token, &cred) {
+            (Some(t), _) => format!("Bearer {t}"),
+            (None, Some(c)) => authorization_for(c, true),
+            (None, None) => return Err(first_err),
+        };
+        let secrets: Vec<String> = cred.iter().map(|c| c.password.clone()).chain(env_secrets).collect();
+        return github_api_download(rel, &auth, plain).map_err(|e| scrub(e, &secrets));
+    }
+    if net.token.is_some() {
+        return get_with(url, net.token, plain).map_err(|e| scrub(e, &env_secrets));
+    }
+    match get_auth(url, None, false) {
+        Err(e) if is_auth_failure(&e) && https => {
+            let Some(cred) = (net.credential_for)(&host_name_of(url)) else {
+                return Err(e);
+            };
+            let secrets = vec![cred.password.clone()];
+            get_auth(url, Some(&authorization_for(&cred, false)), plain).map_err(|e| scrub(e, &secrets))
+        }
+        other => other,
+    }
 }
 
 fn host_of(u: &reqwest::Url) -> String {
@@ -400,9 +619,8 @@ pub fn ensure_pristine(
     name: &str,
     url: &str,
     expect: &Expect,
-    token: Option<&str>,
+    net: &Net<'_>,
     force: bool,
-    allow_plain_http_token: bool,
 ) -> Result<Pristine> {
     // Offline path: the lock names the file, the store holds it.
     if let (Some(rec), false) = (&expect.recorded, force) {
@@ -424,7 +642,7 @@ pub fn ensure_pristine(
                             }
                         } else {
                             // Marker without the declared algorithm: fetch again to verify.
-                            return download(store_root, name, url, expect, token, allow_plain_http_token);
+                            return download(store_root, name, url, expect, net);
                         }
                     }
                     debug!(pkg = %name, "tarball already in the store, no network");
@@ -440,7 +658,7 @@ pub fn ensure_pristine(
             }
         }
     }
-    download(store_root, name, url, expect, token, allow_plain_http_token)
+    download(store_root, name, url, expect, net)
 }
 
 fn download(
@@ -448,11 +666,10 @@ fn download(
     name: &str,
     url: &str,
     expect: &Expect,
-    token: Option<&str>,
-    allow_plain_http_token: bool,
+    net: &Net<'_>,
 ) -> Result<Pristine> {
     let started = Instant::now();
-    let bytes = get_with(url, token, allow_plain_http_token)?;
+    let bytes = get_authed(url, net)?;
     let digests = Digests::of(&bytes);
     if let Some(want) = expect.effective() {
         if !digests.matches(want) {

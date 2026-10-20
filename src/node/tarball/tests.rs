@@ -178,9 +178,25 @@ impl World {
         previous: &[TarballPackageEntry],
         token: Option<&str>,
     ) -> Result<(Vec<TarballPackageEntry>, PrepareReport)> {
+        self.run_with(sources, previous, token, None, None)
+    }
+
+    /// `cred`: the password git would hand out; `gh_api`: the fake GitHub API base.
+    fn run_with(
+        &self,
+        sources: &[TarballSource],
+        previous: &[TarballPackageEntry],
+        token: Option<&str>,
+        cred: Option<&str>,
+        gh_api: Option<&str>,
+    ) -> Result<(Vec<TarballPackageEntry>, PrepareReport)> {
         let registry = self.registry();
         let token = token.map(String::from);
         let token_for = move |_: &str| token.clone();
+        let cred = cred.map(|c| crate::gitdep::credential::Credential { username: None, password: c.to_string() });
+        let credential_for = move |_: &str| cred.clone();
+        let host = self.server.url("").trim_start_matches("http://").to_string();
+        let gh = gh_api.map(|a| (host.as_str(), a));
         prepare_all(
             self.store.path(),
             sources,
@@ -191,6 +207,8 @@ impl World {
                 token_for: &token_for,
                 registry: &registry,
                 allow_plain_http_token: true,
+                credential_for: &credential_for,
+                github_override: gh,
             },
         )
     }
@@ -474,4 +492,131 @@ fn check_prepared_asks_for_kong_rules_when_the_tree_is_gone() {
 #[test]
 fn redact_masks_every_secret() {
     assert_eq!(redact("a tok b tok", &["tok".into(), "".into()]), "a *** b ***");
+}
+
+// ── Private GitHub releases and the credential git holds ────────────────────
+
+const REL: &str = "/Org/repo/releases/download/v1.0.0/org-haa-1.0.0.tgz";
+
+/// A fake GitHub: the API (tag lookup + asset download) and a signed-URL host.
+fn fake_github(w: &World, bytes: Vec<u8>) -> Server {
+    let signed = Server::start();
+    signed.put("/blob?sig=SECRETSIG", Route::Body(bytes));
+    w.server.put(
+        "/repos/Org/repo/releases/tags/v1.0.0",
+        Route::Body(
+            json!({"assets": [{"id": 7, "name": "other.tgz"}, {"id": 42, "name": "org-haa-1.0.0.tgz"}]})
+                .to_string()
+                .into_bytes(),
+        ),
+    );
+    w.server.put("/repos/Org/repo/releases/assets/42", Route::Redirect(signed.url("/blob?sig=SECRETSIG")));
+    // The release-download URL itself is private: 404 without a session.
+    w.server.put(REL, Route::Status(404));
+    signed
+}
+
+#[test]
+fn a_public_release_asset_needs_no_credential_at_all() {
+    let w = World::new();
+    w.server.put(REL, Route::Body(simple_tarball("haa", "0.1.0", json!({}))));
+    let asked = std::cell::Cell::new(0);
+    let credential_for = |_: &str| {
+        asked.set(asked.get() + 1);
+        None
+    };
+    let registry = w.registry();
+    let token_for = |_: &str| None;
+    let host = w.server.url("").trim_start_matches("http://").to_string();
+    let api = w.server.url("");
+    prepare_all(
+        w.store.path(),
+        &[source("haa", &w.server.url(REL))],
+        &[],
+        &PrepareOptions {
+            force: false,
+            host: HostTriple::current(),
+            token_for: &token_for,
+            registry: &registry,
+            allow_plain_http_token: true,
+            credential_for: &credential_for,
+            github_override: Some((&host, &api)),
+        },
+    )
+    .unwrap();
+    assert_eq!(asked.get(), 0, "git was never asked");
+    assert_eq!(w.server.hits_for(REL)[0].auth, None);
+}
+
+#[test]
+fn a_private_release_goes_through_the_api_and_the_redirect_carries_no_authorization() {
+    let w = World::new();
+    let signed = fake_github(&w, simple_tarball("haa", "0.1.0", json!({})));
+    let token = "tok-SENTINEL-GIT-77";
+    let (entries, _) = w
+        .run_with(&[source("haa", &w.server.url(REL))], &[], None, Some(token), Some(&w.server.url("")))
+        .unwrap();
+    let bearer = format!("Bearer {token}");
+    assert_eq!(w.server.hits_for(REL)[0].auth, None, "anonymous first");
+    assert_eq!(w.server.hits_for("/repos/Org/repo/releases/tags/v1.0.0")[0].auth.as_deref(), Some(bearer.as_str()));
+    assert_eq!(w.server.hits_for("/repos/Org/repo/releases/assets/42")[0].auth.as_deref(), Some(bearer.as_str()));
+    assert_eq!(signed.hits_for("/blob?sig=SECRETSIG")[0].auth, None, "no Authorization on the signed URL");
+    let rules = serde_json::to_string(&entries).unwrap();
+    assert!(!rules.contains(token) && !rules.contains("SECRETSIG"), "{rules}");
+    for f in walkdir::WalkDir::new(w.store.path()).into_iter().flatten().filter(|e| e.file_type().is_file()) {
+        assert!(!String::from_utf8_lossy(&std::fs::read(f.path()).unwrap()).contains(token));
+    }
+}
+
+#[test]
+fn the_environment_token_wins_over_git_and_is_used_by_the_api_too() {
+    let w = World::new();
+    fake_github(&w, simple_tarball("haa", "0.1.0", json!({})));
+    w.run_with(&[source("haa", &w.server.url(REL))], &[], Some("env-SENTINEL"), Some("git-SENTINEL"), Some(&w.server.url("")))
+        .unwrap();
+    assert_eq!(
+        w.server.hits_for("/repos/Org/repo/releases/assets/42")[0].auth.as_deref(),
+        Some("Bearer env-SENTINEL")
+    );
+}
+
+#[test]
+fn a_private_release_without_any_credential_fails_clearly_and_a_refused_one_leaks_nothing() {
+    let w = World::new();
+    fake_github(&w, simple_tarball("haa", "0.1.0", json!({})));
+    let src = source("haa", &w.server.url(REL));
+    let err = w.run_with(&[src.clone()], &[], None, None, Some(&w.server.url(""))).unwrap_err().to_string();
+    assert!(err.contains("HTTP 404") && err.contains("no credential was sent"), "{err}");
+    assert!(err.contains("Git Credential Manager"), "{err}");
+    // A credential the API refuses.
+    w.server.put("/repos/Org/repo/releases/tags/v1.0.0", Route::Status(401));
+    let err = w.run_with(&[src], &[], None, Some("tok-SENTINEL-BAD"), Some(&w.server.url(""))).unwrap_err().to_string();
+    assert!(err.contains("credential was refused"), "{err}");
+    assert!(!err.contains("tok-SENTINEL-BAD"), "{err}");
+}
+
+#[test]
+fn an_unknown_asset_name_is_reported_without_the_token() {
+    let w = World::new();
+    fake_github(&w, Vec::new());
+    let src = source("haa", &w.server.url("/Org/repo/releases/download/v1.0.0/missing.tgz"));
+    w.server.put("/Org/repo/releases/download/v1.0.0/missing.tgz", Route::Status(404));
+    let err = w.run_with(&[src], &[], None, Some("tok-SENTINEL-X"), Some(&w.server.url(""))).unwrap_err().to_string();
+    assert!(err.contains("no asset named 'missing.tgz'"), "{err}");
+    assert!(!err.contains("tok-SENTINEL-X"));
+}
+
+#[test]
+fn another_host_retries_once_with_the_git_credential_after_an_anonymous_refusal() {
+    let w = World::new();
+    // Private on a generic host: 404 anonymously, the tarball with the credential
+    // (the fake server does not check the header, the hits do).
+    w.server.put("/priv.tgz", Route::Status(404));
+    let src = source("haa", &w.server.url("/priv.tgz"));
+    let err = w.run_with(&[src.clone()], &[], None, Some("tok-SENTINEL-G"), None).unwrap_err().to_string();
+    let hits = w.server.hits_for("/priv.tgz");
+    assert_eq!(hits.len(), 2, "anonymous, then once with the credential");
+    assert_eq!(hits[0].auth, None);
+    assert_eq!(hits[1].auth.as_deref(), Some("Bearer tok-SENTINEL-G"));
+    assert!(!err.contains("tok-SENTINEL-G"), "{err}");
 }
