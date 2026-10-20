@@ -8,6 +8,14 @@ and KONG adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Private GitHub repositories without a token to configure.** Tarball dependencies reuse the
+  credential git already has (Git Credential Manager / credential helper / keyring via `git credential
+  fill`, then `gh auth token`) when `KONG_GIT_TOKEN` / `GITHUB_TOKEN` / `GH_TOKEN` are unset; those keep
+  precedence. No prompt, 20 s timeout, in-process cache, never written or logged. A github.com
+  `releases/download` URL is fetched anonymously first (public repos need nothing), then through the
+  REST API (asset resolved by tag and name, `application/octet-stream`, signed redirect followed
+  without the `Authorization` header), the only way a token works on a private release. `kong.git`
+  already ran the git CLI, so its helper works with no variable.
 - **Tarball dependencies (install a built release).** A dependency whose spec is an http(s) tarball URL
   (for example a GitHub Release asset made by `npm pack`) is downloaded once into the store
   (`node/tarballs/<name>/<sha512 12 hex>/`), integrity-checked, extracted and linked at

@@ -323,11 +323,19 @@ credentials, safe extraction and the store; `resolve.rs` + `semver.rs` the flat 
   dist-tag, else `latest` when it satisfies, else the highest satisfying one; placement hoists the
   first version of a name to the top and nests a conflicting one under its requester. A previous
   `kong.rules` entry with the same integrity reuses its packages and asks the registry nothing.
-- **Credentials.** `http_token_for`: `KONG_GIT_TOKEN` (any https host), else `GITHUB_TOKEN`, else
-  `GH_TOKEN` (`github.com` only), never for `http://`. The token travels in `Authorization: Bearer` to
-  the original origin only; redirects are followed manually and drop it; a redirect that downgrades
-  https to http is refused; nothing is printed that came from a redirect.
-- **Tests.** Local http server, no real network: `cargo test --no-default-features node::tarball`.
+- **Credentials.** `http_token_for` gives the environment token: `KONG_GIT_TOKEN` (any https host),
+  else `GITHUB_TOKEN`, else `GH_TOKEN` (`github.com` only), never for `http://`; it wins. Without one,
+  `gitdep/credential.rs` asks the machine: `git credential fill` (stdin `protocol=https
+host=<h>`,
+  prompts off, 20 s timeout, child killed), then `gh auth token` for github.com; the answer is cached
+  in-process per host (misses too) and never persisted. `fetch::get_authed` applies the policy: a
+  github.com release-download URL is fetched anonymously first, then through the REST API (tag lookup,
+  asset by name, `Accept: application/octet-stream`, redirect followed WITHOUT `Authorization`); other
+  URLs use the env token directly, else anonymous then one retry with the git credential. Headers
+  travel to the original origin only; redirects are followed manually and drop them; a downgrade
+  https to http is refused; nothing printed comes from a redirect; errors are scrubbed of the token.
+- **Tests.** Local http server (a fake GitHub API + signed-URL host) and fake `git`/`gh` scripts, no
+  real network or secret: `cargo test --no-default-features node::tarball gitdep::credential`.
 
 ## Module ownership
 

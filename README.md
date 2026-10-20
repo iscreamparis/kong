@@ -299,15 +299,24 @@ is needed: the URL in the dependency value is enough.
   `node_modules/<name>` links to `tree-*/package` (a junction or symlink: Node resolves the real path,
   where the package's own `node_modules` lives). Two projects that resolved different dependency
   versions get two `tree-*` directories and never disturb each other.
-- **Private GitHub release assets.** The same credentials as `kong.git`: `KONG_GIT_TOKEN` for any
-  https host, `GITHUB_TOKEN` then `GH_TOKEN` for `github.com` only. The token is sent as
-  `Authorization: Bearer <token>` on the first request, to the URL's own host only; redirects (GitHub
-  sends the asset to a signed URL on another host) are followed by KONG without the header, and an
-  https download is never downgraded to http. The token is never sent over plain `http://`, and is
-  never in a command line, a URL, `kong.rules`, a path, a marker or a log line; errors are redacted
-  and signed redirect URLs are not printed. There are no prompts: without a credential a private
-  asset fails at once (`HTTP 404 ... no credential was sent: set KONG_GIT_TOKEN, or GITHUB_TOKEN /
-  GH_TOKEN for github.com`). A user:password@ in the URL is refused.
+- **Private GitHub release assets, no token to configure.** KONG reuses the credential git already
+  holds on the machine (Git Credential Manager, any `credential.helper`, the OS keyring), and `gh auth
+  token` as a second source for github.com. Order: `KONG_GIT_TOKEN` (any https host), `GITHUB_TOKEN`,
+  `GH_TOKEN` (github.com) win when set; otherwise KONG asks git (`git credential fill`, never a prompt:
+  `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, 20 s timeout), then `gh`. git is asked only after
+  the anonymous download was refused (401/403/404), so a public asset never needs a credential. The
+  answer is cached in memory for the run and never written anywhere.
+  For a `https://github.com/<owner>/<repo>/releases/download/<tag>/<asset>` URL the token cannot be
+  sent to that URL (GitHub does not accept it there): KONG resolves the asset through the REST API
+  (`GET api.github.com/repos/<owner>/<repo>/releases/tags/<tag>`, find the asset by name, then
+  `GET .../releases/assets/<id>` with `Accept: application/octet-stream`) and follows the redirect to
+  the signed URL without the `Authorization` header. Any other host: anonymous first, then one retry
+  with the credential (`Bearer`, or `Basic` when git returned a username). The token is never sent over
+  plain `http://`, and never in a command line, a URL, `kong.rules`, a path, a marker, a log line or an
+  error (redacted). Without any credential a private asset fails at once (`HTTP 404 ... no credential
+  was sent: ... log in with git ... or set KONG_GIT_TOKEN ...`). A user:password@ in the URL is refused.
+  The token needs read access to the repository (`repo` scope for a classic token); a draft release is
+  not reachable by tag.
 - **`kong solidify`** copies a tarball dependency (with its own `node_modules`) as a real directory;
   **`kong eject`** removes a tarball directory only this project uses and keeps one another project is
   locked to.
@@ -377,7 +386,8 @@ lockfile, optionally gets a build step, and is linked at `node_modules/<name>`.
   instead of hanging. `KONG_GIT_TOKEN` applies to every `https://` host; `GITHUB_TOKEN`, then `GH_TOKEN`,
   apply to `github.com` only. The token is passed to the git child only through `GIT_CONFIG_*`
   environment variables; it is never on a command line, in a URL, in `kong.rules`, in a path, in a marker
-  or in a log line (git stderr printed by KONG is redacted).
+  or in a log line (git stderr printed by KONG is redacted). With no environment token git alone
+  authenticates the clone: its credential helper (GCM, keyring) answers without any variable set.
 - **Build step** (when `build` is set). Runs once per commit and build string, after the install, with
   the repository root as working directory: `bash <build>` if it is a file in the repository, else
   `bash -c "<build>"`. On Windows it uses the bash of Git for Windows (never a `bash.exe` from `PATH`,
