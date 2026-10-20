@@ -363,7 +363,7 @@ fn a_missing_credential_fails_fast_with_a_clear_message_and_no_secret() {
 fn plain_http_never_receives_a_token_in_production_mode() {
     let w = World::new();
     w.server.put("/a.tgz", Route::Body(simple_tarball("haa", "0.1.0", json!({}))));
-    fetch::http_get(&w.server.url("/a.tgz"), Some("tok-SENTINEL-7")).unwrap();
+    fetch::get_with(&w.server.url("/a.tgz"), Some("tok-SENTINEL-7"), false).unwrap();
     assert_eq!(w.server.hits_for("/a.tgz")[0].auth, None);
 }
 

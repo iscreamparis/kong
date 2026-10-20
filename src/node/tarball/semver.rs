@@ -155,7 +155,7 @@ fn parse_partial(s: &str) -> Option<Partial> {
         None => (s, Vec::new()),
     };
     let mut parts = core.split('.');
-    let mut num = |p: Option<&str>| -> Option<Option<u64>> {
+    let num = |p: Option<&str>| -> Option<Option<u64>> {
         match p {
             None => Some(None),
             Some(p) if is_wild(p) => Some(None),

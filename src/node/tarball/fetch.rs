@@ -207,11 +207,8 @@ fn origin_of(u: &reqwest::Url) -> (String, String, Option<u16>) {
 /// `Authorization: Bearer <token>` to the ORIGINAL origin only and only over
 /// https: redirects are followed by hand and never carry the header to another
 /// origin (GitHub answers a release-asset request with a redirect to a signed
-/// URL on another host).
-pub fn http_get(url: &str, token: Option<&str>) -> Result<Vec<u8>> {
-    get_with(url, token, false)
-}
-
+/// URL on another host). `token_over_plain_http` is false everywhere but in the
+/// tests, which can only reach a local http server.
 pub(crate) fn get_with(url: &str, token: Option<&str>, token_over_plain_http: bool) -> Result<Vec<u8>> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("kong-dependency-manager/0.1")
